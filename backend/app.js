@@ -1,7 +1,22 @@
 const express = require('express');
 const dotenv = require('dotenv');
-const refundRouter = require('./routes'); // import router
+const routes = require('./routes');
 
+if (typeof routes === 'function') {
+  // routes.js exports a function, treat as middleware/handler
+  app.post('/process-refund', routes);
+} else if (typeof routes === 'object' && routes !== null) {
+  // routes.js exports object with handlers
+  if (routes.processRefund) {
+    app.post('/process-refund', routes.processRefund);
+  } else if (routes.router) {
+    app.use('/', routes.router);
+  } else {
+    console.error('routes.js exports an object but no recognizable handlers found');
+  }
+} else {
+  console.error('routes.js export format not recognized');
+}
 // Catch unexpected crashes
 process.on('uncaughtException', (err) => {
   console.error('Uncaught Exception:', err);
