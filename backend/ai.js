@@ -1,5 +1,4 @@
 const axios = require("axios");
-require("dotenv").config();
 
 exports.extractRefundDetails = async (inputText) => {
   try {
@@ -31,5 +30,31 @@ exports.extractRefundDetails = async (inputText) => {
   } catch (err) {
     console.error("AI extraction error:", err.message);
     return null;
+  }
+};
+
+exports.getFraudScore = async (inputText) => {
+  try {
+    const prompt = `Rate the likelihood (0 to 1) that the following refund request is fraudulent:\n${inputText}\nOnly respond with a decimal number.`;
+
+    const response = await axios.post(
+      "https://api.openai.com/v1/chat/completions",
+      {
+        model: "gpt-4",
+        messages: [{ role: "user", content: prompt }],
+        temperature: 0
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`
+        }
+      }
+    );
+
+    const score = parseFloat(response.data.choices[0].message.content.trim());
+    return isNaN(score) ? 0 : score;
+  } catch (err) {
+    console.error("AI fraud scoring error:", err.message);
+    return 0;
   }
 };
