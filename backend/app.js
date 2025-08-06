@@ -1,29 +1,35 @@
-const express = require('express');
-const dotenv = require('dotenv');
-const routes = require('./routes');
+const express = require("express");
+const dotenv = require("dotenv");
+const authRoutes = require("./routes/auth");
+const refundRoutes = require("./routes/refund");
+const ipWhitelistMiddleware = require("./middleware/ipWhitelist");
+const authMiddleware = require("./middleware/auth");
 
-dotenv.config(); // Load environment variables early
+dotenv.config();
 
 const app = express();
+
 app.use(express.json());
+app.use(ipWhitelistMiddleware);
 
-// Health check route
-app.get('/', (req, res) => {
-  res.send('Refund Automation Backend is live');
+// Public auth routes (signup, login, 2FA setup)
+app.use("/auth", authRoutes);
+
+// Protected refund routes
+app.use("/refund", authMiddleware, refundRoutes);
+
+app.get("/", (req, res) => {
+  res.send("Refund Automation Backend is live");
 });
 
-// Use routes
-app.use('/', routes);
-
-// Global error handling for crashes
-process.on('uncaughtException', (err) => {
-  console.error('Uncaught Exception:', err);
+// Global error handlers
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught Exception:", err);
 });
-process.on('unhandledRejection', (err) => {
-  console.error('Unhandled Rejection:', err);
+process.on("unhandledRejection", (err) => {
+  console.error("Unhandled Rejection:", err);
 });
 
-// Start the server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
