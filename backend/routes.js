@@ -1,18 +1,35 @@
-// Handles /process-refund POST request
-const express = require('express');
+const express = require("express");
 const router = express.Router();
+const ai = require("./ai");
+const slack = require("./slack");
+const db = require("./db");
 
-// Handle POST /process-refund
-router.post('/process-refund', async (req, res) => {
-  try {
-    // Your refund logic here, e.g., call AI, DB, etc.
-    // For now just return success
+router.post("/process", async (req, res) => {
+  const { message } = req.body;
 
-    res.json({ success: true, message: 'Refund processed' });
-  } catch (error) {
-    console.error('Error processing refund:', error);
-    res.status(500).json({ success: false, message: 'Internal server error' });
+  const data = await ai.extractRefundDetails(message);
+  if (!data) {
+    return res.status(400).json({ error: "Could not extract refund details" });
   }
+
+  const status = data.refund_amount < parseFloat(process.env.AUTO_APPROVE_THRESHOLD || 100)
+    ? "Approved"
+    : "Needs Review";
+
+  const log = {
+    order_id: data.order_id,
+    refund_amount: data.refund_amount,
+    status,
+    customer_name: data.customer_name || "Unknown"
+  };
+
+  await db.logRefund(log);
+
+  if (status === "Needs Review") {
+    await slack.sendAlert(log);
+  }
+
+  res.json({ ...log, message: `Refund ${status}!` });
 });
 
 module.exports = router;
