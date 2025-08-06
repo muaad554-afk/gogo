@@ -1,8 +1,8 @@
 const sqlite3 = require("sqlite3").verbose();
 const db = new sqlite3.Database(process.env.DATABASE_URL || "refunds.db");
 
-// Initialize refunds table if not exists
 db.serialize(() => {
+  // Refunds table
   db.run(`CREATE TABLE IF NOT EXISTS refunds (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     order_id TEXT,
@@ -11,9 +11,28 @@ db.serialize(() => {
     customer_name TEXT,
     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
+
+  // CRM customers table (simple example)
+  db.run(`CREATE TABLE IF NOT EXISTS customers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    customer_name TEXT UNIQUE,
+    email TEXT,
+    phone TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+
+  // Audit trail table
+  db.run(`CREATE TABLE IF NOT EXISTS audit_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    refund_id INTEGER,
+    action TEXT,
+    performed_by TEXT,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(refund_id) REFERENCES refunds(id)
+  )`);
 });
 
-// Insert a refund log entry
+// Log refund
 exports.logRefund = ({ order_id, refund_amount, status, customer_name }) => {
   return new Promise((resolve, reject) => {
     db.run(
@@ -27,31 +46,32 @@ exports.logRefund = ({ order_id, refund_amount, status, customer_name }) => {
   });
 };
 
-// Update refund status by refund id
-exports.updateRefundStatus = (refundId, newStatus) => {
+// Log audit event
+exports.logAudit = ({ refund_id, action, performed_by }) => {
   return new Promise((resolve, reject) => {
     db.run(
-      `UPDATE refunds SET status = ? WHERE id = ?`,
-      [newStatus, refundId],
+      `INSERT INTO audit_logs (refund_id, action, performed_by) VALUES (?, ?, ?)`,
+      [refund_id, action, performed_by],
       function (err) {
         if (err) return reject(err);
-        if (this.changes === 0) return reject(new Error("Refund ID not found"));
-        resolve();
+        resolve(this.lastID);
       }
     );
   });
 };
 
-// Optional: get refund by id (for testing/debugging)
-exports.getRefundById = (refundId) => {
+// Add or get customer
+exports.upsertCustomer = ({ customer_name, email, phone }) => {
   return new Promise((resolve, reject) => {
-    db.get(
-      `SELECT * FROM refunds WHERE id = ?`,
-      [refundId],
-      (err, row) => {
+    db.run(
+      `INSERT OR IGNORE INTO customers (customer_name, email, phone) VALUES (?, ?, ?)`,
+      [customer_name, email || null, phone || null],
+      function (err) {
         if (err) return reject(err);
-        resolve(row);
+        resolve(this.lastID);
       }
     );
   });
 };
+
+module.exports = db;
