@@ -1,8 +1,6 @@
-// app.js — Express app with AI refund automation logic
-
 const express = require('express');
 const dotenv = require('dotenv');
-const refundHandler = require('./routes'); // handles /process-refund route
+const refundRouter = require('./routes'); // import router
 
 // Catch unexpected crashes
 process.on('uncaughtException', (err) => {
@@ -22,8 +20,8 @@ app.get('/', (req, res) => {
   res.send('Refund Automation Backend is live');
 });
 
-// Refund route
-app.post('/process-refund', refundHandler);
+// Use router (this contains your /process-refund route inside)
+app.use('/', refundRouter);
 
 // Start the server
 const PORT = process.env.PORT || 3000;
