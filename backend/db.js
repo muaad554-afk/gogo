@@ -1,8 +1,8 @@
 const sqlite3 = require("sqlite3").verbose();
+const bcrypt = require("bcrypt");
 const db = new sqlite3.Database(process.env.DATABASE_URL || "refunds.db");
 
 db.serialize(() => {
-  // Refunds table
   db.run(`CREATE TABLE IF NOT EXISTS refunds (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     order_id TEXT,
@@ -12,31 +12,70 @@ db.serialize(() => {
     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
 
-  // CRM customers table (simple example)
-  db.run(`CREATE TABLE IF NOT EXISTS customers (
+  db.run(`CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    customer_name TEXT UNIQUE,
-    email TEXT,
-    phone TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  )`);
-
-  // Audit trail table
-  db.run(`CREATE TABLE IF NOT EXISTS audit_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    refund_id INTEGER,
-    action TEXT,
-    performed_by TEXT,
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(refund_id) REFERENCES refunds(id)
+    username TEXT UNIQUE,
+    password_hash TEXT,
+    twofa_secret TEXT
   )`);
 });
 
-// Log refund
+exports.createUser = (username, passwordHash) => {
+  return new Promise((resolve, reject) => {
+    db.run(
+      "INSERT INTO users (username, password_hash) VALUES (?, ?)",
+      [username, passwordHash],
+      function (err) {
+        if (err) return reject(err);
+        resolve(this.lastID);
+      }
+    );
+  });
+};
+
+exports.getUserByUsername = (username) => {
+  return new Promise((resolve, reject) => {
+    db.get(
+      "SELECT * FROM users WHERE username = ?",
+      [username],
+      (err, row) => {
+        if (err) return reject(err);
+        resolve(row);
+      }
+    );
+  });
+};
+
+exports.setUser2FASecret = (userId, secret) => {
+  return new Promise((resolve, reject) => {
+    db.run(
+      "UPDATE users SET twofa_secret = ? WHERE id = ?",
+      [secret, userId],
+      (err) => {
+        if (err) return reject(err);
+        resolve();
+      }
+    );
+  });
+};
+
+exports.getUser2FASecret = (userId) => {
+  return new Promise((resolve, reject) => {
+    db.get(
+      "SELECT twofa_secret FROM users WHERE id = ?",
+      [userId],
+      (err, row) => {
+        if (err) return reject(err);
+        resolve(row ? row.twofa_secret : null);
+      }
+    );
+  });
+};
+
 exports.logRefund = ({ order_id, refund_amount, status, customer_name }) => {
   return new Promise((resolve, reject) => {
     db.run(
-      `INSERT INTO refunds (order_id, refund_amount, status, customer_name) VALUES (?, ?, ?, ?)`,
+      "INSERT INTO refunds (order_id, refund_amount, status, customer_name) VALUES (?, ?, ?, ?)",
       [order_id, refund_amount, status, customer_name],
       function (err) {
         if (err) return reject(err);
@@ -45,33 +84,3 @@ exports.logRefund = ({ order_id, refund_amount, status, customer_name }) => {
     );
   });
 };
-
-// Log audit event
-exports.logAudit = ({ refund_id, action, performed_by }) => {
-  return new Promise((resolve, reject) => {
-    db.run(
-      `INSERT INTO audit_logs (refund_id, action, performed_by) VALUES (?, ?, ?)`,
-      [refund_id, action, performed_by],
-      function (err) {
-        if (err) return reject(err);
-        resolve(this.lastID);
-      }
-    );
-  });
-};
-
-// Add or get customer
-exports.upsertCustomer = ({ customer_name, email, phone }) => {
-  return new Promise((resolve, reject) => {
-    db.run(
-      `INSERT OR IGNORE INTO customers (customer_name, email, phone) VALUES (?, ?, ?)`,
-      [customer_name, email || null, phone || null],
-      function (err) {
-        if (err) return reject(err);
-        resolve(this.lastID);
-      }
-    );
-  });
-};
-
-module.exports = db;
