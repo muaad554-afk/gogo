@@ -3,112 +3,157 @@ const router = express.Router();
 const ai = require("../ai");
 const slack = require("../slack");
 const db = require("../db");
+const authMiddleware = require("../middleware/auth");
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const paypal = require("paypal-rest-sdk");
 const Shopify = require("shopify-api-node");
 
+// PayPal config
 paypal.configure({
-  mode: "sandbox",
+  mode: process.env.PAYPAL_MODE || "sandbox",
   client_id: process.env.PAYPAL_CLIENT_ID,
-  client_secret: process.env.PAYPAL_CLIENT_SECRET
+  client_secret: process.env.PAYPAL_CLIENT_SECRET,
 });
 
+// Shopify client
 const shopify = new Shopify({
-  shopName: process.env.SHOPIFY_SHOP_NAME,
+  shopName: process.env.SHOPIFY_STORE_DOMAIN,
   apiKey: process.env.SHOPIFY_API_KEY,
   password: process.env.SHOPIFY_API_PASSWORD,
-  apiVersion: '2023-07'
+  apiVersion: "2023-07",
 });
 
-router.post("/", async (req, res) => {
-  const { message, paymentInfo } = req.body;
+// Helper to execute refunds
+async function processRefund(paymentInfo, amount) {
+  if (!paymentInfo || !paymentInfo.method) throw new Error("Payment info missing");
 
-  // Fraud scoring
-  const fraudScore = await ai.getFraudScore(message);
-  if (fraudScore > 0.7) {
-    return res.status(403).json({ error: "Refund request flagged as fraudulent" });
+  if (paymentInfo.method === "stripe") {
+    return stripe.refunds.create({
+      payment_intent: paymentInfo.paymentIntentId,
+      amount: Math.round(amount * 100),
+      reason: "requested_by_customer",
+    });
+  } else if (paymentInfo.method === "paypal") {
+    const refundDetails = {
+      amount: {
+        currency: "USD",
+        total: amount.toFixed(2),
+      },
+    };
+    return new Promise((resolve, reject) => {
+      paypal.sale.refund(paymentInfo.saleId, refundDetails, (error, refund) => {
+        if (error) reject(error);
+        else resolve(refund);
+      });
+    });
+  } else {
+    throw new Error("Unsupported payment method");
   }
+}
 
-  // Extract refund details via AI
-  const data = await ai.extractRefundDetails(message);
-  if (!data) {
-    return res.status(400).json({ error: "Could not extract refund details" });
-  }
-
-  // Shopify order validation for extra security
+// Parse refund details from customer message
+router.post("/parse-email", authMiddleware, async (req, res) => {
   try {
-    const order = await shopify.order.get(data.order_id);
-    if (!order) {
-      return res.status(400).json({ error: "Order not found on Shopify" });
-    }
+    const { message } = req.body;
+    if (!message) return res.status(400).json({ error: "Message is required" });
+
+    const data = await ai.extractRefundDetails(message);
+    if (!data) return res.status(400).json({ error: "Could not extract refund details" });
+
+    res.json({ data });
   } catch (err) {
-    return res.status(400).json({ error: "Shopify order validation failed" });
+    console.error("Error parsing refund email:", err);
+    res.status(500).json({ error: "Internal server error" });
   }
+});
 
-  // Auto-approve based on threshold
-  const autoThreshold = parseFloat(process.env.AUTO_APPROVE_THRESHOLD || "100");
-  const status = data.refund_amount < autoThreshold ? "Approved" : "Needs Review";
+// Auto-approve refund and execute if under threshold
+router.post("/auto-approve", authMiddleware, async (req, res) => {
+  try {
+    const { message, paymentInfo } = req.body;
+    if (!message) return res.status(400).json({ error: "Message is required" });
 
-  // Log refund
-  const refundLogId = await db.logRefund({
-    order_id: data.order_id,
-    refund_amount: data.refund_amount,
-    status,
-    customer_name: data.customer_name || "Unknown"
-  });
+    // Fraud scoring
+    const fraudScore = await ai.getFraudScore(message);
+    if (fraudScore > parseFloat(process.env.FRAUD_SCORE_THRESHOLD || "0.7")) {
+      return res.status(403).json({ error: "Refund flagged as fraudulent" });
+    }
 
-  // Slack alert if needs review
-  if (status === "Needs Review") {
-    await slack.sendAlert({
+    // Extract refund data
+    const data = await ai.extractRefundDetails(message);
+    if (!data) return res.status(400).json({ error: "Could not extract refund details" });
+
+    // Shopify order validation
+    try {
+      await shopify.order.get(data.order_id);
+    } catch {
+      return res.status(400).json({ error: "Shopify order validation failed" });
+    }
+
+    const autoThreshold = parseFloat(process.env.AUTO_APPROVE_THRESHOLD || "100");
+    const status = data.refund_amount <= autoThreshold ? "Approved" : "Needs Review";
+
+    // Log refund
+    const refundLogId = await db.logRefund({
       order_id: data.order_id,
       refund_amount: data.refund_amount,
       status,
       customer_name: data.customer_name || "Unknown",
-      fraudScore,
-      refundLogId
     });
-  }
 
-  // Refund via Stripe/PayPal for auto-approved refunds
-  if (status === "Approved" && paymentInfo) {
-    try {
-      if (paymentInfo.method === "stripe") {
-        await stripe.refunds.create({
-          payment_intent: paymentInfo.paymentIntentId,
-          amount: Math.round(data.refund_amount * 100),
-          reason: "requested_by_customer"
-        });
-      } else if (paymentInfo.method === "paypal") {
-        const refundDetails = {
-          amount: {
-            currency: "USD",
-            total: data.refund_amount.toFixed(2)
-          }
-        };
-        await new Promise((resolve, reject) => {
-          paypal.sale.refund(paymentInfo.saleId, refundDetails, function (error, refund) {
-            if (error) {
-              reject(error);
-            } else {
-              resolve(refund);
-            }
-          });
-        });
-      }
-    } catch (err) {
-      console.error("Payment refund failed:", err);
-      return res.status(500).json({ error: "Refund processing failed" });
+    // Slack alert on "Needs Review"
+    if (status === "Needs Review") {
+      await slack.sendAlert({
+        order_id: data.order_id,
+        refund_amount: data.refund_amount,
+        status,
+        customer_name: data.customer_name || "Unknown",
+        fraudScore,
+        refundLogId,
+      });
+
+      return res.json({ refundLogId, status, fraudScore, message: "Refund requires manual review" });
     }
-  }
 
-  res.json({
-    order_id: data.order_id,
-    refund_amount: data.refund_amount,
-    status,
-    customer_name: data.customer_name || "Unknown",
-    fraudScore,
-    message: `Refund ${status}!`
-  });
+    // Execute payment refund for auto-approved
+    if (paymentInfo) {
+      try {
+        await processRefund(paymentInfo, data.refund_amount);
+      } catch (refundErr) {
+        console.error("Refund execution failed:", refundErr);
+        return res.status(500).json({ error: "Refund payment execution failed" });
+      }
+    }
+
+    res.json({ refundLogId, status, fraudScore, message: "Refund approved and processed" });
+  } catch (err) {
+    console.error("Auto-approve refund error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Manual override by admin
+router.post("/manual-override", authMiddleware, async (req, res) => {
+  try {
+    const { refundLogId, newStatus } = req.body;
+    if (!refundLogId || !newStatus) return res.status(400).json({ error: "refundLogId and newStatus are required" });
+
+    const updated = await db.updateRefundStatus(refundLogId, newStatus);
+    if (!updated) return res.status(404).json({ error: "Refund record not found" });
+
+    await db.logAudit({
+      action: "manual-override",
+      refundLogId,
+      newStatus,
+      userId: req.user.id,
+      timestamp: new Date().toISOString(),
+    });
+
+    res.json({ message: "Refund status updated successfully" });
+  } catch (err) {
+    console.error("Manual override error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
 });
 
 module.exports = router;
