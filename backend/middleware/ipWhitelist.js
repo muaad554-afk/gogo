@@ -1,12 +1,17 @@
-const ip = require("ip");
+const allowedIPs = (process.env.IP_WHITELIST || "")
+  .split(",")
+  .map(ip => ip.trim());
 
 module.exports = function (req, res, next) {
-  const whitelist = process.env.IP_WHITELIST?.split(",") || [];
-  const clientIp = req.headers["x-forwarded-for"]?.split(",")[0] || req.ip;
+  // Prefer x-forwarded-for header for real client IP behind proxies
+  let clientIP = req.headers['x-forwarded-for']?.split(",")[0].trim() || req.ip;
 
-  if (!whitelist.includes(clientIp) && !whitelist.includes("::1")) {
-    return res.status(403).json({ message: "IP not allowed" });
+  // Normalize IPv6 localhost
+  if (clientIP === "::1") clientIP = "127.0.0.1";
+
+  if (allowedIPs.length === 0 || allowedIPs.includes(clientIP)) {
+    return next();
   }
 
-  next();
+  res.status(403).json({ error: "Forbidden: IP not whitelisted" });
 };
