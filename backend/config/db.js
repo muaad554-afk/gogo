@@ -3,7 +3,7 @@ const path = require("path");
 const crypto = require("crypto");
 const bcrypt = require("bcrypt");
 
-// Encryption config - from env
+// Encryption config
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
 const IV_LENGTH = 16; // AES block size
 
@@ -29,15 +29,14 @@ function decrypt(encrypted) {
   return decrypted;
 }
 
-// DB path setup
+// DB path and connection
 const dbPath = process.env.DATABASE_URL || path.join(__dirname, "..", "refunds.db");
-
 const db = new sqlite3.Database(dbPath, (err) => {
   if (err) {
     console.error("Failed to connect to DB:", err.message);
   } else {
     console.log(`Connected to SQLite DB at ${dbPath}`);
-    runMigrations(); // Run migrations on startup
+    runMigrations();
   }
 });
 
@@ -69,8 +68,7 @@ function all(sql, params = []) {
   });
 }
 
-// Migration system (same as your version, omitted here for brevity)
-
+// Migration system
 async function runMigrations() {
   try {
     await run(`CREATE TABLE IF NOT EXISTS migrations (
@@ -86,6 +84,7 @@ async function runMigrations() {
       {
         name: "init_tables",
         up: async () => {
+          // Clients table
           await run(`CREATE TABLE IF NOT EXISTS clients (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL,
@@ -93,6 +92,7 @@ async function runMigrations() {
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
           )`);
 
+          // Credentials table with encrypted keys per service
           await run(`CREATE TABLE IF NOT EXISTS credentials (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             client_id INTEGER UNIQUE,
@@ -103,6 +103,7 @@ async function runMigrations() {
             FOREIGN KEY(client_id) REFERENCES clients(id)
           )`);
 
+          // Refunds table
           await run(`CREATE TABLE IF NOT EXISTS refunds (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             client_id INTEGER,
@@ -114,14 +115,19 @@ async function runMigrations() {
             FOREIGN KEY(client_id) REFERENCES clients(id)
           )`);
 
+          // Audit logs with extended columns
           await run(`CREATE TABLE IF NOT EXISTS audit_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             client_id INTEGER,
             action TEXT,
+            refund_log_id INTEGER,
+            new_status TEXT,
+            user_id INTEGER,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(client_id) REFERENCES clients(id)
           )`);
 
+          // Users with password hash, 2FA secret, admin flag
           await run(`CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             username TEXT UNIQUE NOT NULL,
@@ -131,6 +137,7 @@ async function runMigrations() {
           )`);
         }
       },
+      // Add future migrations here...
     ];
 
     for (const migration of migrations) {
@@ -164,7 +171,6 @@ exports.getUser2FASecret = (userId) =>
     row ? row.twofa_secret : null
   );
 
-// New: verify password helper
 exports.verifyUserPassword = async (username, password) => {
   const user = await exports.getUserByUsername(username);
   if (!user) return false;
@@ -179,7 +185,7 @@ exports.createClient = ({ name, email }) =>
 
 exports.getAllClients = () => all("SELECT * FROM clients");
 
-// --- Credentials - encrypted storage & retrieval ---
+// --- Credentials ---
 exports.saveEncryptedCredentials = async ({
   client_id,
   stripe_key,
@@ -231,11 +237,9 @@ exports.logRefund = ({
     [client_id, order_id, refund_amount, status, customer_name]
   ).then((result) => result.lastID);
 
-// New: update refund status by refund ID
 exports.updateRefundStatus = (refundId, newStatus) =>
   run("UPDATE refunds SET status = ? WHERE id = ?", [newStatus, refundId]);
 
-// New: get refunds by filters (clientId mandatory, plus optional filters)
 exports.getRefunds = async ({
   client_id,
   status = null,
@@ -263,11 +267,12 @@ exports.getRefunds = async ({
   return all(query, params);
 };
 
-// --- Audit logs ---
-exports.logAudit = ({ client_id, action }) =>
-  run("INSERT INTO audit_logs (client_id, action) VALUES (?, ?)", [
-    client_id,
-    action,
-  ]).then((result) => result.lastID);
+// --- Audit Logs ---
+exports.logAudit = ({ client_id, action, refund_log_id = null, new_status = null, user_id = null, timestamp = null }) =>
+  run(
+    `INSERT INTO audit_logs (client_id, action, refund_log_id, new_status, user_id, timestamp)
+     VALUES (?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP))`,
+    [client_id, action, refund_log_id, new_status, user_id, timestamp]
+  ).then((result) => result.lastID);
 
 exports.db = db;
