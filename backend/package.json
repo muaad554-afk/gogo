@@ -1,3 +1,4 @@
+"start": "node index.js"
 {
   "name": "refund-automation-frontend",
   "version": "1.0.0",
