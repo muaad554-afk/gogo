@@ -2,7 +2,7 @@
 
 const express = require('express');
 const dotenv = require('dotenv');
-const refundHandler = require('./route'); // handles /process-refund route
+const refundHandler = require('./routes'); // handles /process-refund route
 
 // Catch unexpected crashes
 process.on('uncaughtException', (err) => {
