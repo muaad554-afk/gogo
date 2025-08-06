@@ -1,6 +1,7 @@
 const sqlite3 = require("sqlite3").verbose();
 const path = require("path");
 const crypto = require("crypto");
+const bcrypt = require("bcrypt");
 
 // Encryption config - from env
 const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY;
@@ -68,7 +69,8 @@ function all(sql, params = []) {
   });
 }
 
-// Migration system
+// Migration system (same as your version, omitted here for brevity)
+
 async function runMigrations() {
   try {
     await run(`CREATE TABLE IF NOT EXISTS migrations (
@@ -77,11 +79,9 @@ async function runMigrations() {
       run_on DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
 
-    // Check applied migrations
     const applied = await all(`SELECT name FROM migrations`);
     const appliedNames = applied.map(m => m.name);
 
-    // List of migration scripts to run (add new here when needed)
     const migrations = [
       {
         name: "init_tables",
@@ -131,12 +131,6 @@ async function runMigrations() {
           )`);
         }
       },
-
-      // Future migrations here, e.g.,
-      // {
-      //   name: "add_new_column_to_clients",
-      //   up: async () => { await run("ALTER TABLE clients ADD COLUMN new_col TEXT"); }
-      // },
     ];
 
     for (const migration of migrations) {
@@ -152,7 +146,7 @@ async function runMigrations() {
   }
 }
 
-// Users
+// --- Users ---
 exports.createUser = (username, passwordHash, isAdmin = false) =>
   run(
     "INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, ?)",
@@ -170,7 +164,14 @@ exports.getUser2FASecret = (userId) =>
     row ? row.twofa_secret : null
   );
 
-// Clients
+// New: verify password helper
+exports.verifyUserPassword = async (username, password) => {
+  const user = await exports.getUserByUsername(username);
+  if (!user) return false;
+  return bcrypt.compare(password, user.password_hash);
+};
+
+// --- Clients ---
 exports.createClient = ({ name, email }) =>
   run("INSERT INTO clients (name, email) VALUES (?, ?)", [name, email]).then(
     (result) => result.lastID
@@ -178,7 +179,7 @@ exports.createClient = ({ name, email }) =>
 
 exports.getAllClients = () => all("SELECT * FROM clients");
 
-// Credentials - encrypted storage & retrieval
+// --- Credentials - encrypted storage & retrieval ---
 exports.saveEncryptedCredentials = async ({
   client_id,
   stripe_key,
@@ -217,7 +218,7 @@ exports.getDecryptedCredentials = async (client_id) => {
   };
 };
 
-// Refunds
+// --- Refunds ---
 exports.logRefund = ({
   client_id,
   order_id,
@@ -230,7 +231,39 @@ exports.logRefund = ({
     [client_id, order_id, refund_amount, status, customer_name]
   ).then((result) => result.lastID);
 
-// Audit logs
+// New: update refund status by refund ID
+exports.updateRefundStatus = (refundId, newStatus) =>
+  run("UPDATE refunds SET status = ? WHERE id = ?", [newStatus, refundId]);
+
+// New: get refunds by filters (clientId mandatory, plus optional filters)
+exports.getRefunds = async ({
+  client_id,
+  status = null,
+  startDate = null,
+  endDate = null,
+}) => {
+  let query = "SELECT * FROM refunds WHERE client_id = ?";
+  const params = [client_id];
+
+  if (status) {
+    query += " AND status = ?";
+    params.push(status);
+  }
+  if (startDate) {
+    query += " AND timestamp >= ?";
+    params.push(startDate);
+  }
+  if (endDate) {
+    query += " AND timestamp <= ?";
+    params.push(endDate);
+  }
+
+  query += " ORDER BY timestamp DESC";
+
+  return all(query, params);
+};
+
+// --- Audit logs ---
 exports.logAudit = ({ client_id, action }) =>
   run("INSERT INTO audit_logs (client_id, action) VALUES (?, ?)", [
     client_id,
