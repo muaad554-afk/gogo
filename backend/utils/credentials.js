@@ -1,31 +1,67 @@
 const db = require("../config/db");
-const { encrypt, decrypt } = require("./crypto");
 
 const MOCK_MODE = process.env.MOCK_MODE === "true";
 
-// Save or update encrypted credentials
+// Save or update encrypted credentials for a client, plus save version history
 async function saveCredentials(clientId, { stripeKey, paypalKey, slackUrl, openAiKey }) {
-  if (MOCK_MODE) return;
+  if (MOCK_MODE) {
+    // Skip saving real creds or save dummy data during mock mode
+    return;
+  }
 
-  const encrypted = {
-    stripe_key: stripeKey ? encrypt(stripeKey) : null,
-    paypal_key: paypalKey ? encrypt(paypalKey) : null,
-    slack_url: slackUrl ? encrypt(slackUrl) : null,
-    openai_key: openAiKey ? encrypt(openAiKey) : null,
-  };
+  // Save each credential as a separate record with type and key
+  // Types are fixed strings for clarity, keys are descriptive strings per credential
 
-  // Save to credentials table
-  await db.saveEncryptedCredentials({ client_id: clientId, ...encrypted });
+  if (stripeKey !== undefined) {
+    await db.updateCredential(clientId, "api_key", "stripe", stripeKey).catch(async () => {
+      await db.storeCredential(clientId, "api_key", "stripe", stripeKey);
+    });
+    await db.saveCredentialVersion({
+      client_id: clientId,
+      type: "api_key",
+      key: "stripe",
+      value: db.encrypt(stripeKey),
+    });
+  }
 
-  // Save to history table
-  await db.saveCredentialVersion({
-    client_id: clientId,
-    ...encrypted,
-    timestamp: new Date().toISOString(),
-  });
+  if (paypalKey !== undefined) {
+    await db.updateCredential(clientId, "api_key", "paypal", paypalKey).catch(async () => {
+      await db.storeCredential(clientId, "api_key", "paypal", paypalKey);
+    });
+    await db.saveCredentialVersion({
+      client_id: clientId,
+      type: "api_key",
+      key: "paypal",
+      value: db.encrypt(paypalKey),
+    });
+  }
+
+  if (slackUrl !== undefined) {
+    await db.updateCredential(clientId, "webhook_url", "slack", slackUrl).catch(async () => {
+      await db.storeCredential(clientId, "webhook_url", "slack", slackUrl);
+    });
+    await db.saveCredentialVersion({
+      client_id: clientId,
+      type: "webhook_url",
+      key: "slack",
+      value: db.encrypt(slackUrl),
+    });
+  }
+
+  if (openAiKey !== undefined) {
+    await db.updateCredential(clientId, "api_key", "openai", openAiKey).catch(async () => {
+      await db.storeCredential(clientId, "api_key", "openai", openAiKey);
+    });
+    await db.saveCredentialVersion({
+      client_id: clientId,
+      type: "api_key",
+      key: "openai",
+      value: db.encrypt(openAiKey),
+    });
+  }
 }
 
-// Decrypt credentials
+// Retrieve and decrypt all credentials for a client
 async function getCredentials(clientId) {
   if (MOCK_MODE) {
     return {
@@ -36,24 +72,32 @@ async function getCredentials(clientId) {
     };
   }
 
-  const record = await db.getEncryptedCredentials(clientId);
-  if (!record) return null;
+  const creds = {};
+  const typesAndKeys = [
+    { type: "api_key", key: "stripe", prop: "stripeKey" },
+    { type: "api_key", key: "paypal", prop: "paypalKey" },
+    { type: "webhook_url", key: "slack", prop: "slackUrl" },
+    { type: "api_key", key: "openai", prop: "openAiKey" },
+  ];
 
-  return {
-    stripeKey: record.stripe_key ? decrypt(record.stripe_key) : null,
-    paypalKey: record.paypal_key ? decrypt(record.paypal_key) : null,
-    slackUrl: record.slack_url ? decrypt(record.slack_url) : null,
-    openAiKey: record.openai_key ? decrypt(record.openai_key) : null,
-  };
+  for (const { type, key, prop } of typesAndKeys) {
+    const val = await db.getCredential(clientId, type, key);
+    creds[prop] = val || null;
+  }
+
+  return creds;
 }
 
-// Delete stored credentials
+// Delete all credentials for a client
 async function deleteCredentials(clientId) {
   if (MOCK_MODE) return;
-  await db.deleteCredentials(clientId);
+  const allCreds = await db.getAllCredentialsMasked(clientId);
+  for (const cred of allCreds) {
+    await db.deleteCredential(cred.id);
+  }
 }
 
-// Retrieve version history
+// Get credential version history (masked except slackUrl decrypted)
 async function getCredentialHistory(clientId) {
   if (MOCK_MODE) {
     return [
@@ -68,13 +112,23 @@ async function getCredentialHistory(clientId) {
   }
 
   const records = await db.getCredentialHistory(clientId);
-  return records.map(r => ({
-    timestamp: r.timestamp,
-    stripeKey: r.stripe_key ? "****" : null,
-    paypalKey: r.paypal_key ? "****" : null,
-    slackUrl: r.slack_url ? decrypt(r.slack_url) : null,
-    openAiKey: r.openai_key ? "****" : null,
-  }));
+
+  // Organize versions by timestamp
+  const grouped = {};
+  for (const rec of records) {
+    if (!grouped[rec.timestamp]) grouped[rec.timestamp] = {};
+    if (rec.type === "api_key") {
+      if (rec.key === "stripe") grouped[rec.timestamp].stripeKey = "****";
+      else if (rec.key === "paypal") grouped[rec.timestamp].paypalKey = "****";
+      else if (rec.key === "openai") grouped[rec.timestamp].openAiKey = "****";
+    } else if (rec.type === "webhook_url" && rec.key === "slack") {
+      grouped[rec.timestamp].slackUrl = decrypt(rec.value);
+    }
+    grouped[rec.timestamp].timestamp = rec.timestamp;
+  }
+
+  // Convert grouped object to array sorted by timestamp descending
+  return Object.values(grouped).sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
 }
 
 module.exports = {
