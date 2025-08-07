@@ -27,7 +27,8 @@
     "speakeasy": "^2.0.0",
     "sqlite": "^4.1.2",
     "stripe": "^14.17.0",
-    "uuid": "^9.0.1"
+    "uuid": "^9.0.1",
+    "sqlite3": "^5.1.6"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
