@@ -3,28 +3,29 @@ const { encrypt, decrypt } = require("./crypto");
 
 const MOCK_MODE = process.env.MOCK_MODE === "true";
 
-// Save or update encrypted credentials for a client
+// Save or update encrypted credentials
 async function saveCredentials(clientId, { stripeKey, paypalKey, slackUrl, openAiKey }) {
-  if (MOCK_MODE) {
-    // Skip saving real creds or save dummy data during mock mode
-    return;
-  }
+  if (MOCK_MODE) return;
 
-  const encStripeKey = stripeKey ? encrypt(stripeKey) : null;
-  const encPaypalKey = paypalKey ? encrypt(paypalKey) : null;
-  const encSlackUrl = slackUrl ? encrypt(slackUrl) : null;
-  const encOpenAiKey = openAiKey ? encrypt(openAiKey) : null;
+  const encrypted = {
+    stripe_key: stripeKey ? encrypt(stripeKey) : null,
+    paypal_key: paypalKey ? encrypt(paypalKey) : null,
+    slack_url: slackUrl ? encrypt(slackUrl) : null,
+    openai_key: openAiKey ? encrypt(openAiKey) : null,
+  };
 
-  await db.saveEncryptedCredentials({
+  // Save to credentials table
+  await db.saveEncryptedCredentials({ client_id: clientId, ...encrypted });
+
+  // Save to history table
+  await db.saveCredentialVersion({
     client_id: clientId,
-    stripe_key: encStripeKey,
-    paypal_key: encPaypalKey,
-    slack_url: encSlackUrl,
-    openai_key: encOpenAiKey,
+    ...encrypted,
+    timestamp: new Date().toISOString(),
   });
 }
 
-// Retrieve and decrypt credentials for a client
+// Decrypt credentials
 async function getCredentials(clientId) {
   if (MOCK_MODE) {
     return {
@@ -46,12 +47,39 @@ async function getCredentials(clientId) {
   };
 }
 
-// Optional: Delete credentials for a client (if you want)
+// Delete stored credentials
 async function deleteCredentials(clientId) {
-  if (MOCK_MODE) {
-    return;
-  }
+  if (MOCK_MODE) return;
   await db.deleteCredentials(clientId);
 }
 
-module.exports = { saveCredentials, getCredentials, deleteCredentials };
+// Retrieve version history
+async function getCredentialHistory(clientId) {
+  if (MOCK_MODE) {
+    return [
+      {
+        timestamp: "mock_time",
+        stripeKey: "****",
+        paypalKey: "****",
+        slackUrl: "https://hooks.slack.com/mock",
+        openAiKey: "****",
+      },
+    ];
+  }
+
+  const records = await db.getCredentialHistory(clientId);
+  return records.map(r => ({
+    timestamp: r.timestamp,
+    stripeKey: r.stripe_key ? "****" : null,
+    paypalKey: r.paypal_key ? "****" : null,
+    slackUrl: r.slack_url ? decrypt(r.slack_url) : null,
+    openAiKey: r.openai_key ? "****" : null,
+  }));
+}
+
+module.exports = {
+  saveCredentials,
+  getCredentials,
+  deleteCredentials,
+  getCredentialHistory,
+};
