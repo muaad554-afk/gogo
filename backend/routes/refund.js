@@ -1,3 +1,4 @@
+// routes/refunds.js
 const express = require("express");
 const router = express.Router();
 const ai = require("../ai");
@@ -5,41 +6,32 @@ const slack = require("../slack");
 const db = require("../db");
 const Stripe = require("stripe");
 const paypal = require("paypal-rest-sdk");
-const Shopify = require("shopify-api-node");
+const { validateOrder } = require("../shopify");
+const logger = require("../utils/logs");
+const authMiddleware = require("../middleware/auth");
 
-// Middleware to load client credentials
-async function loadClientCredentials(clientId) {
-  const creds = await db.getDecryptedCredentials(clientId);
-  if (!creds) throw new Error("Client credentials not found");
-  return creds;
-}
-
-// Configure PayPal SDK dynamically per client
-function configurePaypal(clientPaypalKey) {
-  paypal.configure({
-    mode: process.env.PAYPAL_MODE || "sandbox",
-    client_id: clientPaypalKey.client_id,
-    client_secret: clientPaypalKey.client_secret,
-  });
-}
+router.use(authMiddleware);
 
 router.post("/", async (req, res) => {
-  try {
-    const { client_id, message, paymentInfo, manualOverride } = req.body;
-    if (!client_id || !message) {
-      return res.status(400).json({ error: "client_id and message required" });
-    }
+  const clientId = req.user.clientId || req.user.id;
+  const { message, paymentInfo, manualOverride } = req.body;
 
-    // Load client credentials
-    const creds = await loadClientCredentials(client_id);
+  if (!message) {
+    return res.status(400).json({ error: "message is required" });
+  }
+
+  try {
+    // Load client credentials (decrypted)
+    const creds = await db.getDecryptedCredentials(clientId);
     if (!creds) {
+      await logger.error("Missing client credentials", clientId);
       return res.status(400).json({ error: "Missing client credentials" });
     }
 
     // Initialize Stripe with client's key
     const stripe = new Stripe(creds.stripeKey);
 
-    // Configure PayPal if keys are present (paypal_key expected to be JSON with id and secret)
+    // Configure PayPal if keys present
     let paypalCredentials = null;
     if (creds.paypalKey) {
       try {
@@ -49,72 +41,59 @@ router.post("/", async (req, res) => {
           client_id: paypalCredentials.client_id,
           client_secret: paypalCredentials.client_secret,
         });
-      } catch {
-        // invalid paypal key format
+      } catch (e) {
+        await logger.warn("Invalid PayPal key format", clientId);
       }
     }
 
-    // Fraud scoring
-    const fraudScore = await ai.getFraudScore(message, creds.openAiKey);
+    // Get fraud score using AI
+    const fraudScore = await ai.getFraudScore(message, clientId);
+
     if (fraudScore > (parseFloat(process.env.FRAUD_SCORE_THRESHOLD) || 0.7)) {
       await db.logAudit({
-        client_id,
-        action: `Refund flagged as fraudulent (score: ${fraudScore})`,
+        client_id: clientId,
+        message: `Refund flagged as fraudulent (score: ${fraudScore})`,
       });
       return res.status(403).json({ error: "Refund request flagged as fraudulent" });
     }
 
-    // Extract refund details via AI
-    const data = await ai.extractRefundDetails(message, creds.openAiKey);
+    // Extract refund details using AI
+    const data = await ai.extractRefundDetails(message, clientId);
     if (!data) {
       return res.status(400).json({ error: "Could not extract refund details" });
     }
 
     // Shopify order validation if Shopify credentials exist
-    if (creds.shopifyDomain && creds.shopifyApiKey && creds.shopifyApiSecret) {
-      const shopify = new Shopify({
-        shopName: creds.shopifyDomain,
-        apiKey: creds.shopifyApiKey,
-        password: creds.shopifyApiSecret,
-        apiVersion: "2023-07",
-      });
-      try {
-        const order = await shopify.order.get(data.order_id);
-        if (!order) {
-          return res.status(400).json({ error: "Order not found on Shopify" });
-        }
-      } catch (e) {
-        return res.status(400).json({ error: "Shopify order validation failed" });
+    if (creds.shopifyAccessToken && creds.shopifyShopName) {
+      const isValid = await validateOrder(clientId, creds.shopifyShopName, data.order_id);
+      if (!isValid) {
+        return res.status(400).json({ error: "Order not found on Shopify" });
       }
     }
 
-    // Determine auto-approve threshold
+    // Determine refund status and respect manual override
     const autoThreshold = parseFloat(process.env.AUTO_APPROVE_THRESHOLD || "100");
-    let status = data.refund_amount < autoThreshold ? "Approved" : "Needs Review";
+    let status = data.refund_amount <= autoThreshold ? "Approved" : "Needs Review";
+    if (manualOverride) status = "Approved";
 
-    // Manual override sets to Approved immediately
-    if (manualOverride) {
-      status = "Approved";
-    }
-
-    // Log refund
+    // Log refund in DB
     const refundLogId = await db.logRefund({
-      client_id,
+      client_id: clientId,
       order_id: data.order_id,
       refund_amount: data.refund_amount,
       status,
       customer_name: data.customer_name || "Unknown",
+      created_at: new Date().toISOString(),
     });
 
-    // Log audit for refund creation
+    // Log audit entry
     await db.logAudit({
-      client_id,
-      action: `Refund logged with status: ${status}`,
+      client_id: clientId,
+      message: `Refund logged with status: ${status}`,
       refund_log_id: refundLogId,
-      new_status: status,
     });
 
-    // Slack alert if flagged
+    // Send Slack alert if review needed
     if (status === "Needs Review" && creds.slackUrl) {
       await slack.sendAlert(
         {
@@ -129,7 +108,7 @@ router.post("/", async (req, res) => {
       );
     }
 
-    // Process refund if approved and payment info provided
+    // Process refund if approved and payment info given
     if (status === "Approved" && paymentInfo) {
       try {
         if (paymentInfo.method === "stripe" && creds.stripeKey) {
@@ -146,20 +125,20 @@ router.post("/", async (req, res) => {
             },
           };
           await new Promise((resolve, reject) => {
-            paypal.sale.refund(paymentInfo.saleId, refundDetails, (error, refund) => {
-              if (error) reject(error);
+            paypal.sale.refund(paymentInfo.saleId, refundDetails, (err, refund) => {
+              if (err) reject(err);
               else resolve(refund);
             });
           });
         }
-      } catch (err) {
+      } catch (refundError) {
         await db.logAudit({
-          client_id,
-          action: "Refund processing failed",
+          client_id: clientId,
+          message: "Refund processing failed",
           refund_log_id: refundLogId,
-          user_id: req.user?.id || null,
+          user_id: req.user.id,
         });
-        console.error("Payment refund failed:", err);
+        await logger.error(`Refund processing failed: ${refundError.message}`, clientId);
         return res.status(500).json({ error: "Refund processing failed" });
       }
     }
@@ -172,8 +151,8 @@ router.post("/", async (req, res) => {
       fraudScore,
       message: `Refund ${status}!`,
     });
-  } catch (error) {
-    console.error("Refund route error:", error);
+  } catch (err) {
+    await logger.error(`Refund route error: ${err.message}`, req.user.clientId || req.user.id);
     res.status(500).json({ error: "Internal server error" });
   }
 });
