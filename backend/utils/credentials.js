@@ -1,8 +1,15 @@
 const db = require("../config/db");
 const { encrypt, decrypt } = require("./crypto");
 
+const MOCK_MODE = process.env.MOCK_MODE === "true";
+
 // Save encrypted credentials for a client
 async function saveCredentials(clientId, { stripeKey, paypalKey, slackUrl, openAiKey }) {
+  if (MOCK_MODE) {
+    // Optionally skip saving real creds or save dummy data during mock mode
+    return;
+  }
+
   const encStripeKey = stripeKey ? encrypt(stripeKey) : null;
   const encPaypalKey = paypalKey ? encrypt(paypalKey) : null;
   const encSlackUrl = slackUrl ? encrypt(slackUrl) : null;
@@ -19,6 +26,15 @@ async function saveCredentials(clientId, { stripeKey, paypalKey, slackUrl, openA
 
 // Retrieve and decrypt credentials for a client
 async function getCredentials(clientId) {
+  if (MOCK_MODE) {
+    return {
+      stripeKey: "mock_stripe_key",
+      paypalKey: "mock_paypal_key",
+      slackUrl: "https://hooks.slack.com/mock",
+      openAiKey: "mock_openai_key",
+    };
+  }
+
   const record = await db.getEncryptedCredentials(clientId);
   if (!record) return null;
 
