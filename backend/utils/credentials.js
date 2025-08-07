@@ -1,49 +1,69 @@
-const db = require("../config/db");
-const { encrypt, decrypt } = require("./crypto");
+const express = require("express");
+const router = express.Router();
+const Joi = require("joi");
+const { getCredentials, saveCredentials, deleteCredentials } = require("../utils/credentials");
 
-const MOCK_MODE = process.env.MOCK_MODE === "true";
+// Validation schema
+const credentialsSchema = Joi.object({
+  stripeKey: Joi.string().allow(null, "").optional(),
+  paypalKey: Joi.string().allow(null, "").optional(),
+  slackUrl: Joi.string().uri().allow(null, "").optional(),
+  openAiKey: Joi.string().allow(null, "").optional(),
+});
 
-// Save encrypted credentials for a client
-async function saveCredentials(clientId, { stripeKey, paypalKey, slackUrl, openAiKey }) {
-  if (MOCK_MODE) {
-    // Optionally skip saving real creds or save dummy data during mock mode
-    return;
-  }
+// GET credentials (masked)
+router.get("/", async (req, res) => {
+  try {
+    const clientId = req.user.clientId;
+    const creds = await getCredentials(clientId);
+    if (!creds) return res.status(404).json({ error: "Credentials not found" });
 
-  const encStripeKey = stripeKey ? encrypt(stripeKey) : null;
-  const encPaypalKey = paypalKey ? encrypt(paypalKey) : null;
-  const encSlackUrl = slackUrl ? encrypt(slackUrl) : null;
-  const encOpenAiKey = openAiKey ? encrypt(openAiKey) : null;
-
-  await db.saveEncryptedCredentials({
-    client_id: clientId,
-    stripe_key: encStripeKey,
-    paypal_key: encPaypalKey,
-    slack_url: encSlackUrl,
-    openai_key: encOpenAiKey,
-  });
-}
-
-// Retrieve and decrypt credentials for a client
-async function getCredentials(clientId) {
-  if (MOCK_MODE) {
-    return {
-      stripeKey: "mock_stripe_key",
-      paypalKey: "mock_paypal_key",
-      slackUrl: "https://hooks.slack.com/mock",
-      openAiKey: "mock_openai_key",
+    // Mask credentials except slackUrl (which is a public webhook url)
+    const maskedCreds = {
+      stripeKey: creds.stripeKey ? "****" : null,
+      paypalKey: creds.paypalKey ? "****" : null,
+      slackUrl: creds.slackUrl || null,
+      openAiKey: creds.openAiKey ? "****" : null,
     };
+
+    res.json(maskedCreds);
+  } catch (error) {
+    console.error("Error fetching credentials:", error);
+    res.status(500).json({ error: "Failed to fetch credentials" });
   }
+});
 
-  const record = await db.getEncryptedCredentials(clientId);
-  if (!record) return null;
+// POST update/save credentials
+router.post("/", async (req, res) => {
+  try {
+    const clientId = req.user.clientId;
+    const newCreds = req.body;
 
-  return {
-    stripeKey: record.stripe_key ? decrypt(record.stripe_key) : null,
-    paypalKey: record.paypal_key ? decrypt(record.paypal_key) : null,
-    slackUrl: record.slack_url ? decrypt(record.slack_url) : null,
-    openAiKey: record.openai_key ? decrypt(record.openai_key) : null,
-  };
-}
+    // Validate input
+    const { error, value } = credentialsSchema.validate(newCreds);
+    if (error) {
+      return res.status(400).json({ error: error.details[0].message });
+    }
 
-module.exports = { saveCredentials, getCredentials };
+    await saveCredentials(clientId, value);
+
+    res.json({ message: "Credentials saved/updated successfully" });
+  } catch (error) {
+    console.error("Error saving credentials:", error);
+    res.status(500).json({ error: "Failed to save credentials" });
+  }
+});
+
+// DELETE credentials (optional)
+router.delete("/", async (req, res) => {
+  try {
+    const clientId = req.user.clientId;
+    await deleteCredentials(clientId);
+    res.json({ message: "Credentials deleted successfully" });
+  } catch (error) {
+    console.error("Error deleting credentials:", error);
+    res.status(500).json({ error: "Failed to delete credentials" });
+  }
+});
+
+module.exports = router;
