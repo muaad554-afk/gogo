@@ -1,9 +1,7 @@
--- Drop existing tables
 DROP TABLE IF EXISTS refunds;
 DROP TABLE IF EXISTS clients;
 DROP TABLE IF EXISTS audit_logs;
 
--- Clients Table (Multi-tenant)
 CREATE TABLE clients (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL,
@@ -18,10 +16,10 @@ CREATE TABLE clients (
   slack_webhook_url TEXT,
   openai_api_key TEXT,
   encryption_iv TEXT NOT NULL,
+  mock_mode INTEGER DEFAULT 0,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
--- Refunds Table
 CREATE TABLE refunds (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   email TEXT NOT NULL,
@@ -37,7 +35,6 @@ CREATE TABLE refunds (
   FOREIGN KEY (client_id) REFERENCES clients(id)
 );
 
--- Audit Logs Table
 CREATE TABLE audit_logs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   client_id INTEGER NOT NULL,
