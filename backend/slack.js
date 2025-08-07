@@ -1,19 +1,23 @@
 const axios = require("axios");
 
-exports.sendAlert = async (data) => {
-  try {
-    const text = `
-🚨 *Refund flagged for manual review*:
-- Order: ${data.order_id}
-- Amount: $${data.refund_amount}
-- Customer: ${data.customer_name}
-- Status: ${data.status}
-- Fraud Score: ${data.fraudScore.toFixed(2)}
-- Log ID: ${data.refundLogId}
-    `;
+const mockSend = async () => console.log("[Mock Slack] Alert sent");
 
-    await axios.post(process.env.SLACK_WEBHOOK_URL, { text });
+async function sendAlert(refund, webhookUrl) {
+  if (process.env.MOCK_MODE === "true") return mockSend();
+
+  const text = `🚨 *Refund Needs Review* 🚨
+• Order ID: ${refund.order_id}
+• Amount: $${refund.refund_amount}
+• Customer: ${refund.customer_name}
+• Status: ${refund.status}
+• Fraud Score: ${refund.fraudScore}
+• Log ID: ${refund.refundLogId}`;
+
+  try {
+    await axios.post(webhookUrl, { text });
   } catch (err) {
     console.error("Slack alert failed:", err.message);
   }
-};
+}
+
+module.exports = { sendAlert };
