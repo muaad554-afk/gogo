@@ -3,6 +3,7 @@ const path = require("path");
 
 const WHITELIST_FILE = path.join(__dirname, "../data/ip_whitelist.json");
 
+// Utility functions
 function loadWhitelist() {
   if (!fs.existsSync(WHITELIST_FILE)) return [];
   return JSON.parse(fs.readFileSync(WHITELIST_FILE, "utf-8"));
@@ -34,9 +35,20 @@ function isIPWhitelisted(ip) {
   return ips.includes(ip);
 }
 
+// Express middleware
+function ipWhitelist(req, res, next) {
+  const ip = req.ip || req.connection.remoteAddress;
+  if (isIPWhitelisted(ip)) {
+    next();
+  } else {
+    res.status(403).json({ error: "IP not whitelisted" });
+  }
+}
+
 module.exports = {
   getWhitelistedIPs,
   addIPToWhitelist,
   removeIPFromWhitelist,
   isIPWhitelisted,
+  ipWhitelist,
 };
