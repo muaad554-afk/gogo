@@ -28,6 +28,7 @@ app.use(bodyParser.json());
 app.use(morgan("combined", { stream: logger.stream }));
 
 // IP Whitelist Middleware - blocks unauthorized IPs early
+const { ipWhitelist } = require('./utils/ipWhitelist');
 app.use(ipWhitelist);
 
 // JWT Authentication Middleware
