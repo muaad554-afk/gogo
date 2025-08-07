@@ -9,7 +9,6 @@ const twoFAMiddleware = require("./utils/2fa");
 const logger = require("./utils/logs");
 
 // Routes
-console.log({
 const authRoutes = require("./routes/auth");
 const setupCredentialsRoutes = require("./routes/setupCredentials");
 const shopifyOAuthRoutes = require("./routes/oauth");
