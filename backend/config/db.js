@@ -246,7 +246,7 @@ async function getAuditLogs(clientId = null, limit = 100) {
 // MASKING UTILITY
 //
 
-
+module.exports = {
   // Clients
   getClientById,
   getClientByEmail,
