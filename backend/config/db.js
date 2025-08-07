@@ -1,6 +1,5 @@
 const sqlite3 = require("sqlite3");
 const { open } = require("sqlite");
-const crypto = require("crypto");
 const path = require("path");
 
 const { encrypt, decrypt } = require("../utils/encryption");
@@ -35,6 +34,15 @@ async function init() {
         key TEXT,
         value TEXT,
         FOREIGN KEY (client_id) REFERENCES clients(id)
+      );
+
+      CREATE TABLE IF NOT EXISTS credentials_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        client_id INTEGER,
+        type TEXT,
+        key TEXT,
+        value TEXT,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
       );
 
       CREATE TABLE IF NOT EXISTS refunds (
@@ -163,6 +171,26 @@ async function updateCredential(clientId, type, key, newValue) {
 }
 
 //
+// Credentials Versioning (history)
+//
+
+async function saveCredentialVersion({ client_id, type, key, value, timestamp = new Date().toISOString() }) {
+  await init();
+  await db.run(
+    `INSERT INTO credentials_history (client_id, type, key, value, timestamp) VALUES (?, ?, ?, ?, ?)`,
+    [client_id, type, key, value, timestamp]
+  );
+}
+
+async function getCredentialHistory(clientId) {
+  await init();
+  return db.all(
+    `SELECT client_id, type, key, value, timestamp FROM credentials_history WHERE client_id = ? ORDER BY timestamp DESC`,
+    [clientId]
+  );
+}
+
+//
 // REFUNDS
 //
 
@@ -214,6 +242,15 @@ async function getAuditLogs(clientId = null, limit = 100) {
   return db.all(`SELECT * FROM audit_logs ORDER BY timestamp DESC LIMIT ?`, [limit]);
 }
 
+//
+// MASKING UTILITY
+//
+
+function maskCredential(secret) {
+  if (!secret || secret.length < 8) return "********";
+  return secret.slice(0, 3) + "*".repeat(secret.length - 6) + secret.slice(-3);
+}
+
 module.exports = {
   init,
 
@@ -233,12 +270,19 @@ module.exports = {
   deleteCredential,
   updateCredential,
 
+  // Credential versioning
+  saveCredentialVersion,
+  getCredentialHistory,
+
   // Refunds
   createRefund,
   getRecentRefunds,
   getRefundByOrderId,
 
-  // Logs
+  // Audit logs
   logAudit,
   getAuditLogs,
+
+  // Mask utility (exported in case needed)
+  maskCredential,
 };
