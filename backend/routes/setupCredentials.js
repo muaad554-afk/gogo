@@ -1,32 +1,28 @@
 const express = require("express");
 const authMiddleware = require("../middleware/auth");
-const db = require("../config/db");
+const { saveCredentials } = require("../utils/credentials");
 
 const router = express.Router();
 
-// POST /setup-credentials
-// Body: { stripeKey, paypalKey, slackUrl, openAiKey }
 router.post("/", authMiddleware, async (req, res) => {
   try {
-    const clientId = req.user.id; // Assuming user is client owner or admin
-
+    const clientId = req.user.clientId || req.user.id; // Adapt depending on your auth payload
     const { stripeKey, paypalKey, slackUrl, openAiKey } = req.body;
 
-    if (!stripeKey && !paypalKey && !slackUrl && !openAiKey) {
-      return res.status(400).json({ error: "At least one credential required" });
+    if (
+      !stripeKey &&
+      !paypalKey &&
+      !slackUrl &&
+      !openAiKey
+    ) {
+      return res.status(400).json({ error: "At least one credential must be provided" });
     }
 
-    await db.saveEncryptedCredentials({
-      client_id: clientId,
-      stripe_key: stripeKey,
-      paypal_key: paypalKey,
-      slack_url: slackUrl,
-      openai_key: openAiKey,
-    });
+    await saveCredentials(clientId, { stripeKey, paypalKey, slackUrl, openAiKey });
 
-    res.json({ message: "Credentials saved securely" });
-  } catch (err) {
-    console.error("Setup credentials error:", err);
+    res.json({ message: "Credentials saved successfully" });
+  } catch (error) {
+    console.error("Setup credentials error:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 });
