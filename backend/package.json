@@ -31,3 +31,6 @@
     "nodemon": "^3.0.1"
   }
 }
+"scripts": {
+  "test": "jest"
+}
