@@ -1,14 +1,13 @@
 const express = require("express");
 const router = express.Router();
 const Joi = require("joi");
+
 const {
   getCredentials,
   saveCredentials,
   deleteCredentials,
-  getCredentialHistory,
-  logCredentialVersion,
+  getCredentialHistory
 } = require("../utils/credentials");
-const { maskCredential } = require("../utils/security");
 
 // Validation schema
 const credentialsSchema = Joi.object({
@@ -18,100 +17,97 @@ const credentialsSchema = Joi.object({
   openAiKey: Joi.string().allow(null, "").optional(),
 });
 
-// Utility to determine target client
-function resolveTargetClientId(req, paramClientId) {
-  const isAdmin = req.user?.role === "admin";
-  return isAdmin && paramClientId ? paramClientId : req.user?.clientId;
+// Middleware to restrict to admin
+function requireAdmin(req, res, next) {
+  if (req.user?.role !== "admin") {
+    return res.status(403).json({ error: "Admin access only" });
+  }
+  next();
 }
 
-// ============================
-// GET /credentials
-// ============================
-router.get("/:clientId?", async (req, res) => {
+// GET current (masked) credentials
+router.get("/", requireAdmin, async (req, res) => {
   try {
-    const targetClientId = resolveTargetClientId(req, req.params.clientId);
+    const clientId = req.user.clientId;
+    const creds = await getCredentials(clientId);
+    if (!creds) return res.status(404).json({ error: "No credentials found" });
 
-    const creds = await getCredentials(targetClientId);
-    if (!creds) return res.status(404).json({ error: "Credentials not found" });
-
-    const maskedCreds = {
-      stripeKey: maskCredential(creds.stripeKey),
-      paypalKey: maskCredential(creds.paypalKey),
+    res.json({
+      stripeKey: creds.stripeKey ? "****" : null,
+      paypalKey: creds.paypalKey ? "****" : null,
       slackUrl: creds.slackUrl || null,
-      openAiKey: maskCredential(creds.openAiKey),
-    };
-
-    res.json(maskedCreds);
-  } catch (error) {
-    console.error("Error fetching credentials:", error);
+      openAiKey: creds.openAiKey ? "****" : null,
+    });
+  } catch (err) {
+    console.error("Error fetching credentials:", err);
     res.status(500).json({ error: "Failed to fetch credentials" });
   }
 });
 
-// ============================
-// POST /credentials
-// ============================
-router.post("/:clientId?", async (req, res) => {
+// GET credential history
+router.get("/history", requireAdmin, async (req, res) => {
   try {
-    const targetClientId = resolveTargetClientId(req, req.params.clientId);
-    const { error, value } = credentialsSchema.validate(req.body);
-    if (error) return res.status(400).json({ error: error.details[0].message });
+    const clientId = req.user.clientId;
+    const history = await getCredentialHistory(clientId); // You must implement this in utils/credentials
+    res.json(history || []);
+  } catch (err) {
+    console.error("Error fetching credential history:", err);
+    res.status(500).json({ error: "Failed to fetch history" });
+  }
+});
 
-    // Log the version before overwrite (if not mock mode)
-    if (process.env.MOCK_MODE !== "true") {
-      const oldCreds = await getCredentials(targetClientId);
-      if (oldCreds) await logCredentialVersion(targetClientId, oldCreds);
-    }
+// POST - Save or update credentials
+router.post("/", requireAdmin, async (req, res) => {
+  const clientId = req.user.clientId;
+  const { error, value } = credentialsSchema.validate(req.body);
+  if (error) return res.status(400).json({ error: error.details[0].message });
 
-    await saveCredentials(targetClientId, value);
+  try {
+    await saveCredentials(clientId, value); // versioning should be handled inside saveCredentials
     res.json({ message: "Credentials saved/updated successfully" });
-  } catch (error) {
-    console.error("Error saving credentials:", error);
+  } catch (err) {
+    console.error("Error saving credentials:", err);
     res.status(500).json({ error: "Failed to save credentials" });
   }
 });
 
-// ============================
-// DELETE /credentials
-// ============================
-router.delete("/:clientId?", async (req, res) => {
+// DELETE all credentials for this client
+router.delete("/", requireAdmin, async (req, res) => {
   try {
-    const targetClientId = resolveTargetClientId(req, req.params.clientId);
-
-    await deleteCredentials(targetClientId);
-    res.json({ message: "Credentials deleted successfully" });
-  } catch (error) {
-    console.error("Error deleting credentials:", error);
+    await deleteCredentials(req.user.clientId);
+    res.json({ message: "All credentials deleted successfully" });
+  } catch (err) {
+    console.error("Error deleting credentials:", err);
     res.status(500).json({ error: "Failed to delete credentials" });
   }
 });
 
-// ============================
-// GET /credentials/history
-// ============================
-router.get("/history/:clientId?", async (req, res) => {
+// DELETE a single provider's credential (e.g., /credentials/stripe)
+router.delete("/:provider", requireAdmin, async (req, res) => {
+  const validProviders = ["stripe", "paypal", "slack", "openai"];
+  const provider = req.params.provider.toLowerCase();
+
+  if (!validProviders.includes(provider)) {
+    return res.status(400).json({ error: "Invalid provider" });
+  }
+
   try {
-    const targetClientId = resolveTargetClientId(req, req.params.clientId);
+    const creds = await getCredentials(req.user.clientId);
+    if (!creds) return res.status(404).json({ error: "No credentials found" });
 
-    const history = await getCredentialHistory(targetClientId);
-    if (!history || history.length === 0) {
-      return res.status(404).json({ error: "No credential history found" });
-    }
+    // Nullify only the targeted provider
+    const updated = {
+      stripeKey: provider === "stripe" ? null : creds.stripeKey,
+      paypalKey: provider === "paypal" ? null : creds.paypalKey,
+      slackUrl: provider === "slack" ? null : creds.slackUrl,
+      openAiKey: provider === "openai" ? null : creds.openAiKey,
+    };
 
-    // Mask values in history
-    const maskedHistory = history.map(entry => ({
-      ...entry,
-      stripeKey: maskCredential(entry.stripeKey),
-      paypalKey: maskCredential(entry.paypalKey),
-      slackUrl: entry.slackUrl,
-      openAiKey: maskCredential(entry.openAiKey),
-      timestamp: entry.timestamp,
-    }));
-
-    res.json(maskedHistory);
-  } catch (error) {
-    console.error("Error fetching credential history:", error);
-    res.status(500).json({ error: "Failed to fetch credential history" });
+    await saveCredentials(req.user.clientId, updated);
+    res.json({ message: `${provider} credential deleted successfully` });
+  } catch (err) {
+    console.error("Error deleting single credential:", err);
+    res.status(500).json({ error: "Failed to delete credential" });
   }
 });
 
