@@ -17,21 +17,22 @@ const twoFaRoutes = require("./routes/twofa");
 const credentialsRoutes = require("./routes/credentials");
 const fraudRoutes = require("./routes/fraud");
 const ipRoutes = require("./routes/ip");
+const refundsRoutes = require("./routes/refunds");
 
 const app = express();
-
 const PORT = process.env.PORT || 3000;
 
-// Middleware
+// Middleware setup
 app.use(cors());
 app.use(bodyParser.json());
 app.use(morgan("combined", { stream: logger.stream }));
 
-// IP Whitelist Middleware
+// IP Whitelist Middleware - blocks unauthorized IPs early
 app.use(ipWhitelist);
 
-// JWT Auth Middleware (skipping some routes like /auth/login)
+// JWT Authentication Middleware
 app.use((req, res, next) => {
+  // Public routes that do not require auth
   if (
     req.path.startsWith("/auth") ||
     req.path.startsWith("/health") ||
@@ -59,10 +60,10 @@ app.use((req, res, next) => {
   }
 });
 
-// 2FA Middleware (stub or real)
+// Two-Factor Authentication Middleware (can be stub or real)
 app.use(twoFAMiddleware);
 
-// Routes
+// Route mounting
 app.use("/auth", authRoutes);
 app.use("/setup-credentials", setupCredentialsRoutes);
 app.use("/shopify", shopifyOAuthRoutes);
@@ -71,18 +72,22 @@ app.use("/twofa", twoFaRoutes);
 app.use("/credentials", credentialsRoutes);
 app.use("/fraud", fraudRoutes);
 app.use("/ip", ipRoutes);
+app.use("/refunds", refundsRoutes);
 
-// Health Check
+// Health check endpoint
 app.get("/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
-// Error handler
+// Global error handler
 app.use((err, req, res, next) => {
-  logger.error(err.message, req.user?.clientId);
+  // Log error with clientId if available, fallback to unknown
+  const clientId = req.user?.clientId || req.user?.id || "unknown";
+  logger.error(err.message || "Unknown error", clientId);
   res.status(500).json({ error: "Internal Server Error" });
 });
 
+// Start server
 app.listen(PORT, () => {
   console.log(`AI Refund Automator backend listening on port ${PORT}`);
 });
