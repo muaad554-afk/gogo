@@ -1,80 +1,63 @@
 const express = require("express");
 const router = express.Router();
 const Joi = require("joi");
+
+const authMiddleware = require("../middleware/auth");
 const {
-  getCredentials,
   saveCredentials,
+  getCredentials,
   deleteCredentials,
-  getCredentialHistory,
 } = require("../utils/credentials");
-const { requireAdmin } = require("../middleware/auth");
 
-// Joi validation schema
+// Joi schema for validating input credentials
 const credentialsSchema = Joi.object({
-  stripeKey: Joi.string().allow(null, "").optional(),
-  paypalKey: Joi.string().allow(null, "").optional(),
-  slackUrl: Joi.string().uri().allow(null, "").optional(),
-  openAiKey: Joi.string().allow(null, "").optional(),
+  stripeKey: Joi.string().optional().allow(null, ''),
+  paypalKey: Joi.string().optional().allow(null, ''),
+  slackUrl: Joi.string().uri().optional().allow(null, ''),
+  openAiKey: Joi.string().optional().allow(null, ''),
 });
 
-// GET (masked credentials) — admin-only
-router.get("/", requireAdmin, async (req, res) => {
+// Save or update credentials for a client
+router.post("/setup-credentials", authMiddleware, async (req, res) => {
+  const { error, value } = credentialsSchema.validate(req.body);
+  if (error) return res.status(400).json({ error: error.details[0].message });
+
   try {
-    const clientId = req.user.clientId;
-    const creds = await getCredentials(clientId);
-    if (!creds) return res.status(404).json({ error: "Credentials not found" });
-
-    const masked = {
-      stripeKey: creds.stripeKey ? "****" : null,
-      paypalKey: creds.paypalKey ? "****" : null,
-      slackUrl: creds.slackUrl || null,
-      openAiKey: creds.openAiKey ? "****" : null,
-    };
-
-    res.json(masked);
-  } catch (err) {
-    console.error("Fetch credentials failed:", err);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-// POST (create/update credentials) — admin-only
-router.post("/", requireAdmin, async (req, res) => {
-  try {
-    const { error, value } = credentialsSchema.validate(req.body);
-    if (error) return res.status(400).json({ error: error.details[0].message });
-
-    const clientId = req.user.clientId;
+    const clientId = req.user.id;
     await saveCredentials(clientId, value);
-
-    res.json({ message: "Credentials saved successfully" });
+    res.status(200).json({ success: true, message: "Credentials saved" });
   } catch (err) {
-    console.error("Save credentials failed:", err);
-    res.status(500).json({ error: "Internal server error" });
+    console.error("Error saving credentials:", err);
+    res.status(500).json({ error: "Failed to save credentials" });
   }
 });
 
-// DELETE credentials — admin-only
-router.delete("/", requireAdmin, async (req, res) => {
+// Retrieve credentials (decrypted)
+router.get("/credentials", authMiddleware, async (req, res) => {
   try {
-    const clientId = req.user.clientId;
+    const clientId = req.user.id;
+    const creds = await getCredentials(clientId);
+
+    if (!creds) {
+      return res.status(404).json({ error: "No credentials found" });
+    }
+
+    res.status(200).json({ success: true, credentials: creds });
+  } catch (err) {
+    console.error("Error fetching credentials:", err);
+    res.status(500).json({ error: "Failed to retrieve credentials" });
+  }
+});
+
+// Delete credentials (optional endpoint)
+router.delete("/credentials", authMiddleware, async (req, res) => {
+  try {
+    const clientId = req.user.id;
     await deleteCredentials(clientId);
-    res.json({ message: "Credentials deleted" });
+    res.status(200).json({ success: true, message: "Credentials deleted" });
   } catch (err) {
-    console.error("Delete credentials failed:", err);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-// GET version history of credentials — admin-only
-router.get("/history", requireAdmin, async (req, res) => {
-  try {
-    const clientId = req.user.clientId;
-    const history = await getCredentialHistory(clientId);
-    res.json(history);
-  } catch (err) {
-    console.error("Fetch credential history failed:", err);
-    res.status(500).json({ error: "Internal server error" });
+    console.error("Error deleting credentials:", err);
+    res.status(500).json({ error: "Failed to delete credentials" });
   }
 });
 
