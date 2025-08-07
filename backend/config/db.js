@@ -246,13 +246,6 @@ async function getAuditLogs(clientId = null, limit = 100) {
 // MASKING UTILITY
 //
 
-function maskCredential(secret) {
-  if (!secret || secret.length < 8) return "********";
-  return secret.slice(0, 3) + "*".repeat(secret.length - 6) + secret.slice(-3);
-}
-
-module.exports = {
-  init,
 
   // Clients
   getClientById,
