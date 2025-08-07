@@ -1,8 +1,16 @@
-// Simple 2FA stub - replace with real implementation later
+// utils/2fa.js — 2FA middleware stub
+module.exports = (req, res, next) => {
+  const code = req.headers["x-2fa-code"];
 
-function verify2FAStub(code) {
   const validCode = process.env.DEFAULT_2FA_CODE || "123456";
-  return code === validCode;
-}
 
-module.exports = { verify2FAStub };
+  if (!code) {
+    return res.status(401).json({ error: "2FA code missing" });
+  }
+
+  if (code !== validCode) {
+    return res.status(401).json({ error: "Invalid 2FA code" });
+  }
+
+  next();
+};
