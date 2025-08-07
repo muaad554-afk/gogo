@@ -1,17 +1,20 @@
+const jwt = require("jsonwebtoken");
 const speakeasy = require("speakeasy");
-const db = require("../db");
+const User = require("../models/User");
 
 module.exports = async (req, res, next) => {
   try {
-    const userId = req.user?.id;
-
-    if (!userId) {
-      return res.status(401).json({ error: "Unauthorized: Missing user" });
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({ error: "Unauthorized: Missing token" });
     }
 
-    const user2FASecret = await db.getUser2FASecret(userId);
+    const token = authHeader.split(" ")[1];
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+    const user2FASecret = await User.get2FASecret(decoded.id);
     if (!user2FASecret) {
-      return next(); // Skip if 2FA not enabled
+      return res.status(403).json({ error: "2FA not enabled for user" });
     }
 
     const twoFactorToken = req.headers["x-2fa-token"];
@@ -27,12 +30,12 @@ module.exports = async (req, res, next) => {
     });
 
     if (!verified) {
-      return res.status(401).json({ error: "Invalid 2FA token" });
+      return res.status(403).json({ error: "Invalid 2FA token" });
     }
 
+    req.user = decoded;
     next();
   } catch (err) {
-    console.error("2FA Error:", err);
-    return res.status(401).json({ error: "2FA validation failed" });
+    return res.status(401).json({ error: "Unauthorized: Invalid token" });
   }
 };
