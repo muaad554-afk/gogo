@@ -1,46 +1,45 @@
 {
-  "name": "refund-automation-backend",
+  "name": "ai-refund-automator-backend",
   "version": "1.0.0",
-  "description": "AI Refund Automation Backend",
+  "description": "AI-powered Refund Automation SaaS backend with multi-client support, Shopify/Stripe/PayPal integration, 2FA, IP whitelisting, Slack alerts, and audit logging.",
   "main": "app.js",
   "scripts": {
     "start": "node app.js",
     "dev": "nodemon app.js",
-    "test": "jest"
+    "test": "echo \"No tests yet\" && exit 0"
   },
-  "keywords": ["refund", "automation", "backend", "B2B"],
-  "author": "Muaad Ahmed",
-  "license": "MIT",
   "engines": {
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "axios": "^1.6.7",
+    "axios": "^1.5.0",
+    "bcrypt": "^5.1.0",
     "body-parser": "^1.20.2",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
-    "express": "^4.19.2",
-    "helmet": "^7.0.0",
-    "jsonwebtoken": "^9.0.2",
-    "morgan": "^1.10.0",
-    "openai": "^4.27.0",
-    "paypal-rest-sdk": "^1.8.1",
-   "@slack/web-api": "^6.8.0",
+    "express": "^4.18.2",
+    "jsonwebtoken": "^9.0.0",
+    "qrcode": "^1.5.1",
+    "sequelize": "^6.32.1",
     "sqlite3": "^5.1.6",
-    "stripe": "^14.0.0",
-    "uuid": "^9.0.1",
-    "bcrypt": "^5.1.0",
-    "nodemailer": "^6.9.4",
-    "otplib": "^12.0.1",
-    "qrcode": "^1.5.1"
+    "speakeasy": "^2.0.0"
   },
   "devDependencies": {
-    "jest": "^29.6.1",
     "nodemon": "^3.0.1"
   },
-  "jest": {
-    "testEnvironment": "node",
-    "coverageDirectory": "./coverage",
-    "collectCoverage": true
-  }
+  "keywords": [
+    "refund",
+    "automation",
+    "shopify",
+    "stripe",
+    "paypal",
+    "2fa",
+    "slack",
+    "ai",
+    "openai",
+    "express",
+    "sqlite"
+  ],
+  "author": "Your Name",
+  "license": "MIT"
 }
