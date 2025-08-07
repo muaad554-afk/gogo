@@ -45,9 +45,13 @@ async function logWithLevel(level, message, clientId) {
 
 async function maybeSendSlackAlert(level, message, clientId) {
   if (!clientId) return;
+  if (process.env.SLACK_ALERTS_ENABLED === "false") return; // Optional toggle
+
   try {
     const creds = await getCredentials(clientId);
     if (!creds?.slackUrl) return;
+
+    // Optionally mask keys in the message if needed here
 
     await axios.post(creds.slackUrl, {
       text: `*[${level.toUpperCase()}]* ${message}`,
