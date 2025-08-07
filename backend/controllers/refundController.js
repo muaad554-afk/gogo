@@ -1,39 +1,42 @@
-const { extractOrderDetails, scoreRefundRisk } = require("../utils/ai");
-const { sendSlackAlert } = require("../utils/slack");
-const { issueStripeRefund } = require("../utils/stripe");
-const { issuePayPalRefund } = require("../utils/paypal");
-const { logAudit } = require("../utils/logs");
-const clients = require("../mock");
+const { db } = require('../config/db');
+const { getRefundReason } = require('../utils/openai');
+const { sendSlackAlert } = require('../slack');
+const { logAction } = require('../utils/logs');
+const { processStripeRefund } = require('../stripe');
+const { processPayPalRefund } = require('../paypal');
+const { getClientCredentials } = require('../utils/credentials');
 
-exports.handleRefund = async (req, res) => {
-  try {
-    const { clientId, emailText, paymentPlatform, transactionId } = req.body;
-    const client = clients[clientId];
-    if (!client) return res.status(400).json({ error: "Invalid clientId" });
+const AUTO_APPROVE_THRESHOLD = parseFloat(process.env.AUTO_APPROVE_THRESHOLD || '100');
+const MOCK_MODE = process.env.MOCK_MODE === 'true';
 
-    const { orderId, amount } = await extractOrderDetails(emailText, client.openai);
-    const fraudRisk = await scoreRefundRisk(emailText, client.openai);
+exports.handleRefundRequest = async (req, res) => {
+  const { email, body, amount, platform, orderId } = req.body;
+  const clientId = req.user?.client_id;
 
-    let status;
-    if (amount <= 100 && fraudRisk < 0.5) {
-      if (paymentPlatform === "stripe") {
-        await issueStripeRefund(transactionId, client.stripe);
-      } else if (paymentPlatform === "paypal") {
-        await issuePayPalRefund(transactionId, client.paypal);
-      } else {
-        return res.status(400).json({ error: "Invalid payment platform" });
-      }
-      status = "auto_approved";
-    } else {
-      status = "manual_review";
-    }
-
-    await sendSlackAlert(client.slack, { orderId, amount, status, fraudRisk });
-    await logAudit({ clientId, orderId, amount, status, fraudRisk });
-
-    res.json({ orderId, amount, status, fraudRisk });
-  } catch (err) {
-    console.error("Refund error:", err);
-    res.status(500).json({ error: "Refund failed" });
+  if (!email || !body || !amount || !platform || !orderId) {
+    return res.status(400).json({ error: 'Missing refund fields.' });
   }
-};
+
+  let reason = 'Not provided';
+  let isFraud = false;
+
+  try {
+    // Get GPT reason (mock or real)
+    reason = await getRefundReason(body);
+    isFraud = reason.toLowerCase().includes('fraud') || reason.toLowerCase().includes('suspicious');
+  } catch (err) {
+    if (!MOCK_MODE) {
+      return res.status(500).json({ error: 'Failed to analyze refund.' });
+    }
+  }
+
+  const autoApprove = amount <= AUTO_APPROVE_THRESHOLD && !isFraud;
+
+  const status = autoApprove ? 'approved' : 'pending';
+  const createdAt = new Date().toISOString();
+
+  // Save refund to DB
+  db.run(
+    `INSERT INTO refunds (email, body, amount, platform, order_id, reason, status, auto_approved, client_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [email, body, amount, platform, orderId,]()
