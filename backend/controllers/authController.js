@@ -1,65 +1,62 @@
-const { db } = require('../config/db');
-const bcrypt = require('bcryptjs');
-const { generateToken } = require('../utils/token');
-const { logAction } = require('../utils/logs');
+const bcrypt = require("bcrypt");
+const jwt = require("jsonwebtoken");
+const speakeasy = require("speakeasy");
+const User = require("../models/User");
 
-const MOCK_MODE = process.env.MOCK_MODE === 'true';
+const JWT_SECRET = process.env.JWT_SECRET;
+const JWT_EXPIRATION = process.env.JWT_EXPIRATION || "1d";
 
-// POST /login
-exports.login = (req, res) => {
-  const { username, password, twofaToken } = req.body;
+exports.register = async (req, res) => {
+  try {
+    const { username, password } = req.body;
+    if (!username || !password) return res.status(400).json({ error: "Missing username or password" });
 
-  if (!username || !password) {
-    return res.status(400).json({ error: 'Username and password are required.' });
+    const existingUser = await User.getByUsername(username);
+    if (existingUser) return res.status(409).json({ error: "Username already exists" });
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    const userId = await User.create({ username, passwordHash });
+
+    res.status(201).json({ message: "User registered", userId });
+  } catch (err) {
+    console.error("Register error:", err);
+    res.status(500).json({ error: "Internal server error" });
   }
-
-  db.get(`SELECT * FROM users WHERE username = ?`, [username], async (err, user) => {
-    if (err) return res.status(500).json({ error: 'Internal error.' });
-    if (!user) return res.status(401).json({ error: 'Invalid credentials.' });
-
-    const passwordMatches = await bcrypt.compare(password, user.password);
-    if (!passwordMatches && !MOCK_MODE) {
-      return res.status(401).json({ error: 'Invalid credentials.' });
-    }
-
-    // 2FA check (stub – assume it's valid for now)
-    // Add real TOTP check later in `authWith2FA` middleware
-    if (user.twofa_enabled && !twofaToken && !MOCK_MODE) {
-      return res.status(401).json({ error: '2FA token required.' });
-    }
-
-    const token = generateToken(user.username);
-
-    await logAction(user.client_id, `User ${user.username} logged in.`);
-
-    res.json({ token, message: 'Login successful.' });
-  });
 };
 
-// POST /register (optional)
-exports.register = async (req, res) => {
-  const { username, password, clientId } = req.body;
+exports.login = async (req, res) => {
+  try {
+    const { username, password } = req.body;
+    const user = await User.getByUsername(username);
+    if (!user) return res.status(401).json({ error: "Invalid credentials" });
 
-  if (!username || !password || !clientId) {
-    return res.status(400).json({ error: 'Username, password, and clientId are required.' });
+    const valid = await bcrypt.compare(password, user.password_hash);
+    if (!valid) return res.status(401).json({ error: "Invalid credentials" });
+
+    const payload = {
+      id: user.id,
+      username: user.username,
+      isAdmin: user.is_admin === 1,
+    };
+
+    const token = jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRATION });
+    res.json({ token, twoFAEnabled: !!user.twofa_secret });
+  } catch (err) {
+    console.error("Login error:", err);
+    res.status(500).json({ error: "Internal server error" });
   }
+};
 
-  const hashedPassword = await bcrypt.hash(password, 10);
+exports.enable2FA = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { secret } = req.body;
 
-  db.run(
-    `INSERT INTO users (username, password, client_id, twofa_enabled) VALUES (?, ?, ?, 0)`,
-    [username, hashedPassword, clientId],
-    async function (err) {
-      if (err) {
-        if (err.code === 'SQLITE_CONSTRAINT') {
-          return res.status(409).json({ error: 'Username already exists.' });
-        }
-        return res.status(500).json({ error: 'Error creating user.' });
-      }
-
-      await logAction(clientId, `New user ${username} registered.`);
-
-      res.status(201).json({ message: 'User registered successfully.' });
-    }
-  );
+    if (!secret) return res.status(400).json({ error: "Missing 2FA secret" });
+    await User.set2FASecret(userId, secret);
+    res.json({ message: "2FA enabled" });
+  } catch (err) {
+    console.error("Enable 2FA error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
 };
