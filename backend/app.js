@@ -18,6 +18,7 @@ const credentialsRoutes = require("./routes/credentials");
 const fraudRoutes = require("./routes/fraud");
 const ipRoutes = require("./routes/ip");
 const refundsRoutes = require("./routes/refunds");
+const platformsRoutes = require("./routes/platforms");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -70,6 +71,7 @@ app.use("/credentials", credentialsRoutes);
 app.use("/fraud", fraudRoutes);
 app.use("/ip", ipRoutes);
 app.use("/refunds", refundsRoutes);
+app.use("/platforms", platformsRoutes);
 
 // Health check endpoint
 app.get("/health", (req, res) => {

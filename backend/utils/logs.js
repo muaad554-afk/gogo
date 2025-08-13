@@ -1,7 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const axios = require("axios");
-const { getCredentials } = require("./credentials");
+const db = require("../config/db");
 const { maskCredential } = require("./security");
 
 const LOG_DIR = path.join(__dirname, "..", "logs");
@@ -46,14 +46,15 @@ async function logWithLevel(level, message, clientId) {
 async function maybeSendSlackAlert(level, message, clientId) {
   if (!clientId) return;
   if (process.env.SLACK_ALERTS_ENABLED === "false") return; // Optional toggle
+  if (level === "info") return; // Don't send info level alerts to Slack
 
   try {
-    const creds = await getCredentials(clientId);
-    if (!creds?.slackUrl) return;
+    const slackUrl = await db.getCredential(clientId, "api_key", "slack_webhook");
+    if (!slackUrl) return;
 
     // Optionally mask keys in the message if needed here
 
-    await axios.post(creds.slackUrl, {
+    await axios.post(slackUrl, {
       text: `*[${level.toUpperCase()}]* ${message}`,
     });
   } catch (err) {

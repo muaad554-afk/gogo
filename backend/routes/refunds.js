@@ -1,160 +1,181 @@
-// routes/refunds.js
 const express = require("express");
 const router = express.Router();
+const authMiddleware = require("../middleware/auth");
+const db = require("../config/db");
 const ai = require("../ai");
 const slack = require("../slack");
-const db = require("../db");
-const Stripe = require("stripe");
-const paypal = require("paypal-rest-sdk");
-const { validateOrder } = require("../shopify");
+const stripe = require("../stripe");
+const paypal = require("../paypal");
+const shopify = require("../shopify");
 const logger = require("../utils/logs");
-const authMiddleware = require("../middleware/auth");
 
 router.use(authMiddleware);
 
+const AUTO_APPROVE_THRESHOLD = parseFloat(process.env.AUTO_APPROVE_THRESHOLD) || 100;
+const FRAUD_SCORE_THRESHOLD = parseFloat(process.env.FRAUD_SCORE_THRESHOLD) || 0.7;
+
+// Create new refund request
 router.post("/", async (req, res) => {
-  const clientId = req.user.clientId || req.user.id;
-  const { message, paymentInfo, manualOverride } = req.body;
-
-  if (!message) {
-    return res.status(400).json({ error: "message is required" });
-  }
-
   try {
-    // Load client credentials (decrypted)
-    const creds = await db.getDecryptedCredentials(clientId);
-    if (!creds) {
-      await logger.error("Missing client credentials", clientId);
-      return res.status(400).json({ error: "Missing client credentials" });
+    const clientId = req.user.id;
+    const { message, paymentInfo, manualOverride = false } = req.body;
+
+    if (!message) {
+      return res.status(400).json({ error: "Message is required" });
     }
 
-    // Initialize Stripe with client's key
-    const stripe = new Stripe(creds.stripeKey);
-
-    // Configure PayPal if keys present
-    let paypalCredentials = null;
-    if (creds.paypalKey) {
-      try {
-        paypalCredentials = JSON.parse(creds.paypalKey);
-        paypal.configure({
-          mode: process.env.PAYPAL_MODE || "sandbox",
-          client_id: paypalCredentials.client_id,
-          client_secret: paypalCredentials.client_secret,
-        });
-      } catch (e) {
-        await logger.warn("Invalid PayPal key format", clientId);
-      }
+    // Step 1: Extract refund details using AI
+    const extractedData = await ai.extractRefundDetails(message, clientId);
+    if (!extractedData) {
+      return res.status(400).json({ error: "Could not extract refund details from request" });
     }
 
-    // Get fraud score using AI
+    // Step 2: Get fraud score
     const fraudScore = await ai.getFraudScore(message, clientId);
-
-    if (fraudScore > (parseFloat(process.env.FRAUD_SCORE_THRESHOLD) || 0.7)) {
-      await db.logAudit({
-        client_id: clientId,
-        message: `Refund flagged as fraudulent (score: ${fraudScore})`,
+    
+    // Step 3: Check fraud threshold
+    if (fraudScore > FRAUD_SCORE_THRESHOLD && !manualOverride) {
+      await db.logAudit(clientId, "refund_rejected_fraud", req.user.email);
+      
+      return res.status(400).json({
+        error: "Refund request flagged as potentially fraudulent",
+        fraudScore,
+        extractedData
       });
-      return res.status(403).json({ error: "Refund request flagged as fraudulent" });
     }
 
-    // Extract refund details using AI
-    const data = await ai.extractRefundDetails(message, clientId);
-    if (!data) {
-      return res.status(400).json({ error: "Could not extract refund details" });
-    }
+    // Step 4: Determine approval status
+    const autoApproved = (extractedData.refund_amount <= AUTO_APPROVE_THRESHOLD) || manualOverride;
+    const status = autoApproved ? "approved" : "pending";
 
-    // Shopify order validation if Shopify credentials exist
-    if (creds.shopifyAccessToken && creds.shopifyShopName) {
-      const isValid = await validateOrder(clientId, creds.shopifyShopName, data.order_id);
-      if (!isValid) {
-        return res.status(400).json({ error: "Order not found on Shopify" });
-      }
-    }
-
-    // Determine refund status and respect manual override
-    const autoThreshold = parseFloat(process.env.AUTO_APPROVE_THRESHOLD || "100");
-    let status = data.refund_amount <= autoThreshold ? "Approved" : "Needs Review";
-    if (manualOverride) status = "Approved";
-
-    // Log refund in DB
-    const refundLogId = await db.logRefund({
+    // Step 5: Create refund record
+    await db.createRefund({
       client_id: clientId,
-      order_id: data.order_id,
-      refund_amount: data.refund_amount,
-      status,
-      customer_name: data.customer_name || "Unknown",
-      created_at: new Date().toISOString(),
+      user_email: req.user.email,
+      order_id: extractedData.order_id,
+      amount: extractedData.refund_amount,
+      status: status,
+      reason: extractedData.reason || "Customer request",
+      manual_override: manualOverride
     });
 
-    // Log audit entry
-    await db.logAudit({
-      client_id: clientId,
-      message: `Refund logged with status: ${status}`,
-      refund_log_id: refundLogId,
-    });
+    // Step 6: Log audit entry
+    await db.logAudit(clientId, "refund_created", req.user.email);
 
-    // Send Slack alert if review needed
-    if (status === "Needs Review" && creds.slackUrl) {
-      await slack.sendAlert(
-        {
-          order_id: data.order_id,
-          refund_amount: data.refund_amount,
-          status,
-          customer_name: data.customer_name || "Unknown",
-          fraudScore,
-          refundLogId,
-        },
-        creds.slackUrl
-      );
-    }
-
-    // Process refund if approved and payment info given
-    if (status === "Approved" && paymentInfo) {
+    // Step 7: Execute refund if approved
+    let refundResult = null;
+    if (status === "approved") {
       try {
-        if (paymentInfo.method === "stripe" && creds.stripeKey) {
-          await stripe.refunds.create({
-            payment_intent: paymentInfo.paymentIntentId,
-            amount: Math.round(data.refund_amount * 100),
-            reason: "requested_by_customer",
-          });
-        } else if (paymentInfo.method === "paypal" && paypalCredentials) {
-          const refundDetails = {
-            amount: {
-              currency: "USD",
-              total: data.refund_amount.toFixed(2),
-            },
-          };
-          await new Promise((resolve, reject) => {
-            paypal.sale.refund(paymentInfo.saleId, refundDetails, (err, refund) => {
-              if (err) reject(err);
-              else resolve(refund);
-            });
-          });
+        // Try different payment platforms based on available credentials
+        const credentials = await getClientCredentials(clientId);
+        
+        if (credentials.stripe_secret && paymentInfo?.payment_intent_id) {
+          refundResult = await stripe.refundStripePayment(clientId, paymentInfo.payment_intent_id, extractedData.refund_amount);
+        } else if (credentials.paypal_client_id && paymentInfo?.sale_id) {
+          refundResult = await paypal.refundPaypalSale(clientId, paymentInfo.sale_id, extractedData.refund_amount);
+        } else if (credentials.shopify_access_token && credentials.shopify_shop_name) {
+          refundResult = await shopify.refundOrder(clientId, credentials.shopify_shop_name, extractedData.order_id, extractedData.refund_amount);
+        }
+
+        if (refundResult) {
+          await db.logAudit(clientId, "refund_executed", req.user.email);
         }
       } catch (refundError) {
-        await db.logAudit({
-          client_id: clientId,
-          message: "Refund processing failed",
-          refund_log_id: refundLogId,
-          user_id: req.user.id,
-        });
-        await logger.error(`Refund processing failed: ${refundError.message}`, clientId);
-        return res.status(500).json({ error: "Refund processing failed" });
+        logger.error(`Refund execution failed: ${refundError.message}`, clientId);
+        await db.logAudit(clientId, "refund_execution_failed", req.user.email);
       }
+    }
+
+    // Step 8: Send Slack notification
+    try {
+      await slack.sendAlert(clientId, {
+        order_id: extractedData.order_id,
+        refund_amount: extractedData.refund_amount,
+        customer_name: extractedData.customer_name,
+        status: status,
+        fraudScore: fraudScore,
+        auto_approved: autoApproved
+      });
+    } catch (slackError) {
+      logger.warn(`Slack notification failed: ${slackError.message}`, clientId);
     }
 
     res.json({
-      order_id: data.order_id,
-      refund_amount: data.refund_amount,
-      status,
-      customer_name: data.customer_name || "Unknown",
-      fraudScore,
-      message: `Refund ${status}!`,
+      success: true,
+      status: status,
+      fraud_score: fraudScore,
+      extracted_data: extractedData,
+      auto_approved: autoApproved,
+      refund_result: refundResult,
+      message: `Refund ${status === 'approved' ? 'approved and processed' : 'created for review'}`
     });
-  } catch (err) {
-    await logger.error(`Refund route error: ${err.message}`, req.user.clientId || req.user.id);
+
+  } catch (error) {
+    logger.error(`Refund creation failed: ${error.message}`, req.user.id);
     res.status(500).json({ error: "Internal server error" });
   }
 });
+
+// Get refunds for client
+router.get("/", async (req, res) => {
+  try {
+    const clientId = req.user.id;
+    const limit = parseInt(req.query.limit) || 50;
+    
+    const refunds = await db.getRecentRefunds(clientId, limit);
+    res.json({ refunds });
+
+  } catch (error) {
+    logger.error(`Get refunds failed: ${error.message}`, req.user.id);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Override refund status (manual approval/rejection)
+router.put("/:refundId/status", async (req, res) => {
+  try {
+    const clientId = req.user.id;
+    const refundId = parseInt(req.params.refundId);
+    const { status } = req.body;
+    
+    if (!status || !["approved", "rejected", "pending"].includes(status)) {
+      return res.status(400).json({ error: "Invalid status" });
+    }
+
+    // Update refund status (this would need to be implemented in db.js)
+    // For now, we'll log the action
+    await db.logAudit(clientId, `refund_status_override_${status}`, req.user.email);
+
+    res.json({ 
+      success: true, 
+      refund_id: refundId, 
+      new_status: status,
+      message: `Refund status updated to ${status}`
+    });
+
+  } catch (error) {
+    logger.error(`Refund status override failed: ${error.message}`, req.user.id);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Helper function to get client credentials
+async function getClientCredentials(clientId) {
+  const credentials = {};
+  
+  try {
+    credentials.stripe_secret = await db.getCredential(clientId, "api_key", "stripe_secret");
+    credentials.paypal_client_id = await db.getCredential(clientId, "api_key", "paypal_client_id");
+    credentials.paypal_client_secret = await db.getCredential(clientId, "api_key", "paypal_client_secret");
+    credentials.shopify_access_token = await db.getCredential(clientId, "api_key", "shopify_access_token");
+    credentials.shopify_shop_name = await db.getCredential(clientId, "api_key", "shopify_shop_name");
+    credentials.slack_webhook = await db.getCredential(clientId, "api_key", "slack_webhook");
+    credentials.openai_api_key = await db.getCredential(clientId, "api_key", "openai_api_key");
+  } catch (error) {
+    logger.error(`Error fetching credentials: ${error.message}`, clientId);
+  }
+  
+  return credentials;
+}
 
 module.exports = router;

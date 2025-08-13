@@ -1,6 +1,6 @@
 const jwt = require("jsonwebtoken");
 const speakeasy = require("speakeasy");
-const User = require("../models/User");
+const db = require("../config/db");
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
@@ -14,7 +14,7 @@ module.exports = async (req, res, next) => {
     const token = authHeader.split(" ")[1];
     const decoded = jwt.verify(token, JWT_SECRET);
 
-    const user2FASecret = await User.get2FASecret(decoded.id);
+    const user2FASecret = await db.getUser2FASecret(decoded.id);
 
     if (!user2FASecret) {
       req.user = decoded;

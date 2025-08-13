@@ -1,4 +1,5 @@
 const db = require("../config/db");
+const { encrypt, decrypt } = require("./crypto");
 
 const MOCK_MODE = process.env.MOCK_MODE === "true";
 
@@ -20,7 +21,7 @@ async function saveCredentials(clientId, { stripeKey, paypalKey, slackUrl, openA
       client_id: clientId,
       type: "api_key",
       key: "stripe",
-      value: db.encrypt(stripeKey),
+      value: encrypt(stripeKey),
     });
   }
 
@@ -32,7 +33,7 @@ async function saveCredentials(clientId, { stripeKey, paypalKey, slackUrl, openA
       client_id: clientId,
       type: "api_key",
       key: "paypal",
-      value: db.encrypt(paypalKey),
+      value: encrypt(paypalKey),
     });
   }
 
@@ -44,7 +45,7 @@ async function saveCredentials(clientId, { stripeKey, paypalKey, slackUrl, openA
       client_id: clientId,
       type: "webhook_url",
       key: "slack",
-      value: db.encrypt(slackUrl),
+      value: encrypt(slackUrl),
     });
   }
 
@@ -56,7 +57,7 @@ async function saveCredentials(clientId, { stripeKey, paypalKey, slackUrl, openA
       client_id: clientId,
       type: "api_key",
       key: "openai",
-      value: db.encrypt(openAiKey),
+      value: encrypt(openAiKey),
     });
   }
 }
