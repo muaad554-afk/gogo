@@ -1,127 +1,86 @@
-const axios = require("axios");
-const db = require("./db").db;
-const crypto = require("./utils/crypto");
-const logger = require("./utils/logs");
+const sqlite3 = require("sqlite3").verbose();
+const bcrypt = require("bcrypt");
+const db = new sqlite3.Database(process.env.DATABASE_URL || "refunds.db");
 
-const MOCK_MODE = process.env.MOCK_MODE === "true";
+db.serialize(() => {
+  db.run(`CREATE TABLE IF NOT EXISTS refunds (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id TEXT,
+    refund_amount REAL,
+    status TEXT,
+    customer_name TEXT,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
 
-const getClientOpenAIKey = async (clientId) => {
-  if (MOCK_MODE) return "mock-key";
+  db.run(`CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE,
+    password_hash TEXT,
+    twofa_secret TEXT
+  )`);
+});
 
+exports.createUser = (username, passwordHash) => {
   return new Promise((resolve, reject) => {
-    db.get(
-      "SELECT encrypted_key FROM credentials WHERE client_id = ? AND service = ? ORDER BY id DESC LIMIT 1",
-      [clientId, "openai"],
-      (err, row) => {
-        if (err) {
-          logger.error(`DB error fetching OpenAI key for client ${clientId}: ${err.message}`);
-          return reject(err);
-        }
-        if (!row) return resolve(null);
-        try {
-          const decrypted = crypto.decrypt(row.encrypted_key);
-          resolve(decrypted);
-        } catch (e) {
-          logger.error(`Failed to decrypt OpenAI key for client ${clientId}: ${e.message}`);
-          resolve(null);
-        }
+    db.run(
+      "INSERT INTO users (username, password_hash) VALUES (?, ?)",
+      [username, passwordHash],
+      function (err) {
+        if (err) return reject(err);
+        resolve(this.lastID);
       }
     );
   });
 };
 
-exports.extractRefundDetails = async (inputText, clientId) => {
-  if (MOCK_MODE) {
-    logger.info(`[Mock OpenAI] Refund extraction for client ${clientId}`);
-    return {
-      order_id: "MOCK123456",
-      refund_amount: 19.99,
-      customer_name: "Mock Customer",
-    };
-  }
-
-  const openaiKey = await getClientOpenAIKey(clientId);
-  if (!openaiKey) {
-    logger.error(`No OpenAI key found for client: ${clientId}`);
-    return null;
-  }
-
-  try {
-    const response = await axios.post(
-      "https://api.openai.com/v1/chat/completions",
-      {
-        model: "gpt-4",
-        messages: [
-          {
-            role: "system",
-            content: "Extract order_id, refund_amount, and customer_name ONLY in JSON format.",
-          },
-          {
-            role: "user",
-            content: inputText,
-          },
-        ],
-        temperature: 0,
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${openaiKey}`,
-        },
+exports.getUserByUsername = (username) => {
+  return new Promise((resolve, reject) => {
+    db.get(
+      "SELECT * FROM users WHERE username = ?",
+      [username],
+      (err, row) => {
+        if (err) return reject(err);
+        resolve(row);
       }
     );
-
-    const content = response.data.choices[0].message.content;
-    const match = content.match(/{.*}/s);
-    if (!match) {
-      logger.warn(`OpenAI response missing JSON for client ${clientId}: ${content}`);
-      return null;
-    }
-
-    return JSON.parse(match[0]);
-  } catch (err) {
-    logger.error(`AI extraction error for client ${clientId}: ${err.message}`);
-    return null;
-  }
+  });
 };
 
-exports.getFraudScore = async (inputText, clientId) => {
-  if (MOCK_MODE) {
-    logger.info(`[Mock OpenAI] Fraud scoring for client ${clientId}`);
-    return 0.25;
-  }
-
-  const openaiKey = await getClientOpenAIKey(clientId);
-  if (!openaiKey) {
-    logger.error(`No OpenAI key found for client: ${clientId}`);
-    return 0;
-  }
-
-  try {
-    const prompt = `Rate the likelihood (0 to 1) that the following refund request is fraudulent:\n${inputText}\nOnly respond with a decimal number.`;
-
-    const response = await axios.post(
-      "https://api.openai.com/v1/chat/completions",
-      {
-        model: "gpt-4",
-        messages: [{ role: "user", content: prompt }],
-        temperature: 0,
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${openaiKey}`,
-        },
+exports.setUser2FASecret = (userId, secret) => {
+  return new Promise((resolve, reject) => {
+    db.run(
+      "UPDATE users SET twofa_secret = ? WHERE id = ?",
+      [secret, userId],
+      (err) => {
+        if (err) return reject(err);
+        resolve();
       }
     );
+  });
+};
 
-    const scoreStr = response.data.choices[0].message.content.trim();
-    const score = parseFloat(scoreStr);
-    if (isNaN(score)) {
-      logger.warn(`OpenAI fraud score invalid for client ${clientId}: ${scoreStr}`);
-      return 0;
-    }
-    return score;
-  } catch (err) {
-    logger.error(`AI fraud scoring error for client ${clientId}: ${err.message}`);
-    return 0;
-  }
+exports.getUser2FASecret = (userId) => {
+  return new Promise((resolve, reject) => {
+    db.get(
+      "SELECT twofa_secret FROM users WHERE id = ?",
+      [userId],
+      (err, row) => {
+        if (err) return reject(err);
+        resolve(row ? row.twofa_secret : null);
+      }
+    );
+  });
+};
+
+exports.logRefund = ({ order_id, refund_amount, status, customer_name }) => {
+  return new Promise((resolve, reject) => {
+    db.run(
+      "INSERT INTO refunds (order_id, refund_amount, status, customer_name) VALUES (?, ?, ?, ?)",
+      [order_id, refund_amount, status, customer_name],
+      function (err) {
+        if (err) return reject(err);
+        resolve(this.lastID);
+      }
+    );
+  });
 };
