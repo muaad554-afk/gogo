@@ -1,83 +1,211 @@
 const axios = require("axios");
-const { getCredentials } = require("./utils/credentials");
+const db = require("./db");
+const logger = require("./utils/logs");
 
 const MOCK_MODE = process.env.MOCK_MODE === "true";
 
-async function getShopifyAccessToken(clientId) {
-  const creds = await getCredentials(clientId);
-  if (!creds || !creds.shopifyAccessToken) {
-    throw new Error("Shopify access token not found for client");
+/**
+ * Get Shopify credentials for client
+ */
+async function getShopifyCredentials(clientId) {
+  const accessToken = await db.getCredential(clientId, "shopify_access_token");
+  const shopName = await db.getCredential(clientId, "shopify_shop_name");
+
+  if (!accessToken || !shopName) {
+    throw new Error("Shopify credentials not configured for client");
   }
-  return creds.shopifyAccessToken;
+
+  return { accessToken, shopName };
 }
 
-// Validate that the order exists and belongs to the shop
-async function validateOrder(clientId, shopName, orderId) {
+/**
+ * Validate Shopify order
+ */
+async function validateOrder(clientId, orderId) {
   if (MOCK_MODE) {
-    console.log("[Mock Shopify] Validating order", orderId);
-    return true; // Always valid in mock
+    logger.info(`[Mock Shopify] Validating order ${orderId}`, clientId);
+    return {
+      valid: true,
+      order: {
+        id: orderId,
+        total_price: "50.00",
+        currency: "USD",
+        customer: { first_name: "Mock", last_name: "Customer" }
+      }
+    };
   }
 
-  const accessToken = await getShopifyAccessToken(clientId);
-
   try {
-    const url = `https://${shopName}/admin/api/2023-04/orders/${orderId}.json`;
+    const { accessToken, shopName } = await getShopifyCredentials(clientId);
+
+    const url = `https://${shopName}/admin/api/2023-10/orders/${orderId}.json`;
     const response = await axios.get(url, {
       headers: {
         "X-Shopify-Access-Token": accessToken,
-        "Content-Type": "application/json",
+        "Content-Type": "application/json"
       },
+      timeout: 10000
     });
-    return response.status === 200 && response.data.order != null;
-  } catch (err) {
-    console.error("Shopify order validation error:", err.response?.data || err.message);
-    return false;
+
+    if (response.status === 200 && response.data.order) {
+      logger.info(`Shopify order validated: ${orderId}`, clientId);
+      return { valid: true, order: response.data.order };
+    }
+
+    return { valid: false, error: "Order not found" };
+
+  } catch (error) {
+    logger.error(`Shopify order validation failed: ${error.message}`, clientId);
+    return { valid: false, error: error.message };
   }
 }
 
-// Issue refund via Shopify API (note: Shopify requires creating refund objects tied to order)
-async function refundOrder(clientId, shopName, orderId, refundAmount) {
+/**
+ * Process Shopify refund
+ */
+async function refundOrder(clientId, orderId, refundAmount, reason = "Customer request") {
   if (MOCK_MODE) {
-    console.log(`[Mock Shopify] Refund issued for order ${orderId} amount $${refundAmount}`);
-    return { success: true, refundAmount };
+    logger.info(`[Mock Shopify] Refunding order ${orderId}, amount: $${refundAmount}`, clientId);
+    return {
+      refund: {
+        id: "mock_refund_" + Math.random().toString(36).substr(2, 9),
+        order_id: orderId,
+        amount: refundAmount.toFixed(2),
+        currency: "USD",
+        processed_at: new Date().toISOString()
+      },
+      mock: true
+    };
   }
 
-  const accessToken = await getShopifyAccessToken(clientId);
-
-  // Shopify refund API requires detailed refund structure,
-  // here is a simplified placeholder for demo purposes:
   try {
-    const url = `https://${shopName}/admin/api/2023-04/orders/${orderId}/refunds.json`;
-    // A proper refund request requires transactions and refund_line_items setup,
-    // You may need to fetch order details first and build this payload accordingly.
+    const { accessToken, shopName } = await getShopifyCredentials(clientId);
+
+    // First, get the order details to build proper refund
+    const orderValidation = await validateOrder(clientId, orderId);
+    if (!orderValidation.valid) {
+      throw new Error("Order not found or invalid");
+    }
+
+    const order = orderValidation.order;
+
+    // Create refund payload
     const refundPayload = {
       refund: {
-        note: "Refund via AI Refund Automator",
-        shipping: { full_refund: true },
-        refund_line_items: [], // TODO: fill properly based on order
+        note: reason,
+        notify: true,
+        shipping: {
+          full_refund: false,
+          amount: 0
+        },
+        refund_line_items: order.line_items?.map(item => ({
+          line_item_id: item.id,
+          quantity: item.quantity,
+          restock_type: "return"
+        })) || [],
         transactions: [
           {
-            parent_id: orderId,
+            parent_id: order.id,
             amount: refundAmount.toFixed(2),
             kind: "refund",
-            gateway: "manual",
-          },
-        ],
-      },
+            gateway: order.gateway || "manual"
+          }
+        ]
+      }
     };
 
+    const url = `https://${shopName}/admin/api/2023-10/orders/${orderId}/refunds.json`;
     const response = await axios.post(url, refundPayload, {
       headers: {
         "X-Shopify-Access-Token": accessToken,
-        "Content-Type": "application/json",
+        "Content-Type": "application/json"
       },
+      timeout: 15000
     });
 
+    logger.info(`Shopify refund successful: ${response.data.refund.id}`, clientId);
     return response.data;
-  } catch (err) {
-    console.error("Shopify refund error:", err.response?.data || err.message);
-    throw err;
+
+  } catch (error) {
+    logger.error(`Shopify refund failed: ${error.message}`, clientId);
+    throw error;
   }
 }
 
-module.exports = { validateOrder, refundOrder };
+/**
+ * Get order details
+ */
+async function getOrder(clientId, orderId) {
+  if (MOCK_MODE) {
+    return {
+      id: orderId,
+      total_price: "50.00",
+      currency: "USD",
+      customer: { first_name: "Mock", last_name: "Customer" },
+      mock: true
+    };
+  }
+
+  try {
+    const { accessToken, shopName } = await getShopifyCredentials(clientId);
+
+    const url = `https://${shopName}/admin/api/2023-10/orders/${orderId}.json`;
+    const response = await axios.get(url, {
+      headers: {
+        "X-Shopify-Access-Token": accessToken,
+        "Content-Type": "application/json"
+      },
+      timeout: 10000
+    });
+
+    return response.data.order;
+
+  } catch (error) {
+    logger.error(`Shopify get order failed: ${error.message}`, clientId);
+    throw error;
+  }
+}
+
+/**
+ * List recent orders
+ */
+async function getRecentOrders(clientId, limit = 50) {
+  if (MOCK_MODE) {
+    return {
+      orders: Array.from({ length: 5 }, (_, i) => ({
+        id: `mock_order_${i + 1}`,
+        total_price: (Math.random() * 100 + 10).toFixed(2),
+        currency: "USD",
+        created_at: new Date(Date.now() - i * 86400000).toISOString()
+      })),
+      mock: true
+    };
+  }
+
+  try {
+    const { accessToken, shopName } = await getShopifyCredentials(clientId);
+
+    const url = `https://${shopName}/admin/api/2023-10/orders.json?limit=${limit}&status=any`;
+    const response = await axios.get(url, {
+      headers: {
+        "X-Shopify-Access-Token": accessToken,
+        "Content-Type": "application/json"
+      },
+      timeout: 10000
+    });
+
+    return response.data;
+
+  } catch (error) {
+    logger.error(`Shopify get orders failed: ${error.message}`, clientId);
+    throw error;
+  }
+}
+
+module.exports = {
+  validateOrder,
+  refundOrder,
+  getOrder,
+  getRecentOrders,
+  getShopifyCredentials
+};
